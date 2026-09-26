@@ -1,0 +1,149 @@
+name: Release
+
+# 打 tag（v1.2.3）时自动出正式安装包并发布 Release。
+# 也可以手动触发（workflow_dispatch）—— 适合「先试打一次，不发 Release」。
+#
+# 产出：
+#   - Windows: ClinePassSwitcher-Setup-<版本>.exe（安装版）
+#              ClinePassSwitcher-Portable-<版本>.exe（免安装单文件）
+#   - macOS:   ClinePassSwitcher-<版本>-x64.dmg / -arm64.dmg
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: '只构建，不发布 Release（产物从 Actions 页面下载）'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # 发布 Release 需要
+
+jobs:
+  # 发版前先跑一遍单元测试，避免打出坏包
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: 单元测试
+        run: |
+          npm run test:unit
+          npm run test:usage
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win
+            # 安装版 + 免安装单文件
+            extra_args: ''
+          - os: macos-latest
+            platform: mac
+            extra_args: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: 生成图标
+        run: node scripts/make-icon.mjs
+
+      # mac 要同时出 x64 与 arm64 两个 dmg
+      - name: 打包（Windows）
+        if: matrix.platform == 'win'
+        run: npx electron-builder --win --x64
+        env:
+          # 没有签名证书时不报错（产物是未签名的，首次运行会被系统提示）
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 打包（macOS）
+        if: matrix.platform == 'mac'
+        run: npx electron-builder --mac --x64 --arm64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          mkdir -p out
+          # 只挑安装包，不要把 win-unpacked / mac 目录整个传上去
+          find dist -maxdepth 1 -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' \) -exec cp {} out/ \;
+          echo "--- 产物清单 ---"
+          ls -la out/ || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+
+  # 把两个平台的产物汇总到一个 Release
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && github.event.inputs.draft != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: ls -la artifacts/
+
+      - name: 从 CHANGELOG 或 tag 生成说明
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > NOTES.md <<EOF
+          ## Cline Pass Switcher ${GITHUB_REF_NAME}
+
+          ### 下载
+
+          | 平台 | 文件 | 说明 |
+          |---|---|---|
+          | Windows | \`ClinePassSwitcher-Setup-${VERSION}.exe\` | 安装版（可选目录、创建快捷方式） |
+          | Windows | \`ClinePassSwitcher-Portable-${VERSION}.exe\` | 免安装单文件 |
+          | macOS (Apple Silicon) | \`ClinePassSwitcher-${VERSION}-arm64.dmg\` | M 系列芯片 |
+          | macOS (Intel) | \`ClinePassSwitcher-${VERSION}-x64.dmg\` | Intel 芯片 |
+
+          ### 未签名说明
+
+          这些包**没有代码签名证书**，所以：
+
+          - **Windows**：Smart App Control 开启时会拦截安装包（未签名 exe 被 WDAC 策略挡住）。
+            可以改用免安装版，或右键 → 属性 → 解除锁定；详见 README「已知边界」。
+          - **macOS**：首次打开会被 Gatekeeper 拦。右键 → 打开，或执行
+            \`xattr -cr "/Applications/Cline Pass Switcher.app"\`。
+
+          ### 首次使用
+
+          启动后到「账号池」添加 Cline Pass 的 API Key（\`sk_\` 开头）并保存，代理即可用。
+          EOF
+          echo "notes written"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: NOTES.md
+          files: artifacts/*
+          draft: false
+          generate_release_notes: true

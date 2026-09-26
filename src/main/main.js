@@ -323,6 +323,9 @@ function registerIpc() {
       node: process.versions.node,
       dataDir: USER_DATA,
       seedDir: SEED_DIR,
+      // 系统语言：渲染层的 navigator.language 在部分环境不准，
+      // 主进程的 app.getLocale() 才是权威来源，交给界面做语言自动切换
+      systemLocale: app.getLocale(),
       engine: engineState,
       settings: appSettings,
       config: eng

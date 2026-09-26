@@ -30,7 +30,9 @@
     "test:claudecfg": "node scripts/test-claude-config.mjs",
     "test:usage": "node scripts/test-usage.mjs",
     "test:usage-live": "node scripts/test-usage-live.mjs",
-    "test:usage-e2e": "bash scripts/test-usage-e2e.sh"
+    "test:usage-e2e": "bash scripts/test-usage-e2e.sh",
+    "build:win": "bash scripts/build-win.sh",
+    "build:mac": "bash scripts/build-mac.sh"
   },
   "devDependencies": {
     "electron": "44.4.5",

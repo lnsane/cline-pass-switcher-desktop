@@ -155,7 +155,14 @@
     });
 
     await APP.refresh();
-    // 自绘标题栏要让开系统窗口控件：macOS 让左侧红绿灯，Windows/Linux 让右侧叠加按钮
+    // 界面语言：设置里存过就用它，否则跟随系统。必须在 nav 之前定下来，
+    // 否则首屏会先中文再闪成英文。
+    // 用 configure（而非 setMode）—— setMode 会 location.reload()，在启动路径上就是死循环。
+    if (window.I18N) {
+      window.I18N.configure((APP.boot.settings && APP.boot.settings.language) || 'auto');
+      window.I18N.boot();
+    }
+    // 自绘���题栏要让开系统窗口控件：macOS 让左侧红绿灯，Windows/Linux 让右侧叠加按钮
     document.body.setAttribute('data-platform', APP.boot.platform || 'win32');
     const startView = (APP.boot.settings && APP.boot.settings.lastView) || 'overview';
     await nav(ORDER.includes(startView) ? startView : 'overview', { force: true });

@@ -1,0 +1,110 @@
+name: CI
+
+# 每次推到 main 或开 PR 时跑：先验代码，再构建
+# 注意：这里**不打包**正式安装包（那由 release.yml 在打 tag 时做），
+# 只在 main 上产出可下载的构建目录（artifact），便于随时取一份试。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 同一分支的旧跑批自动取消，省额度
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------- 第一关：代码检查与单元测试 ----------
+  # 只跑不需要上游密钥的测试。打真实上游的那些（test:live / test:e2e）
+  # 需要 Cline 账号密钥，不适合放在公开仓库的 CI 里。
+  verify:
+    name: 代码检查与单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 语法检查
+        run: |
+          for f in src/main/*.js src/main/engine/*.js src/renderer/js/*.js src/renderer/js/views/*.js; do
+            node --check "$f" || exit 1
+          done
+          echo "✓ 全部通过语法检查"
+
+      - name: 主进程模块可加载
+        run: node -e "import('./src/main/claude-config.js').then(m => console.log('✓ claude-config 导出:', Object.keys(m).join(', ')))"
+
+      - name: 协议翻译与用量统计单元测试
+        run: |
+          npm run test:unit
+          npm run test:usage
+
+      - name: 引擎能独立启动并响应
+        run: |
+          DATA_DIR=$(mktemp -d) node src/main/engine/engine.js &
+          ENGINE_PID=$!
+          trap "kill $ENGINE_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 30); do
+            if curl -sf -m 2 http://127.0.0.1:3123/api/meta >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:3123/api/meta | head -c 200
+          echo
+          echo "✓ 引擎启动正常"
+          # 用量接口也要在
+          curl -sf "http://127.0.0.1:3123/api/usage?days=7" | head -c 200
+          echo
+
+  # ---------- 第二关：两个平台各构建一份 ----------
+  build:
+    name: 构建 (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows-unpacked
+            path: dist/win-unpacked
+          - os: macos-latest
+            artifact: macos-app
+            path: dist/mac*
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 生成图标
+        run: node scripts/make-icon.mjs
+
+      # --dir 只构建不打包：快，且不需要签名证书。
+      # 正式安装包交给 release.yml。
+      - name: 构建（不打包安装器）
+        run: npx electron-builder --dir
+        env:
+          # 未配置签名证书时不让 electron-builder 去找，避免报错
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ github.sha }}
+          path: ${{ matrix.path }}
+          retention-days: 14
+          if-no-files-found: warn

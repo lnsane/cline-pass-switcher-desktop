@@ -14,13 +14,22 @@
   let SCANNING = false;
 
   // ---------- 数字格式 ----------
-  // token 动辄百万级，用中文习惯的 万/亿 更好读，但保留精确值在 title 里
+  // token 动辄百万级，用 万/亿 更好读（中文界面），英文界面则用 K/M/B。
+  // 两者都保留精确值在 title 里，鼠标悬停能看到原始数字。
+  const isZh = () => !window.I18N || window.I18N.lang === 'zh';
   function fmtTok(n) {
     const v = Number(n) || 0;
-    if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
-    if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万';
+    if (isZh()) {
+      if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
+      if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万';
+      return U.fmtInt(v);
+    }
+    if (v >= 1e9) return (v / 1e9).toFixed(2) + 'B';
+    if (v >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1) + 'K';
     return U.fmtInt(v);
   }
+  const fmtTokExact = (n) => (Number(n) || 0).toLocaleString(isZh() ? 'zh-CN' : 'en-US');
   function fmtCost(n) {
     const v = Number(n) || 0;
     if (!v) return '$0';
@@ -28,7 +37,6 @@
     if (v < 1) return '$' + v.toFixed(4);
     return '$' + v.toFixed(2);
   }
-  const fmtTokExact = (n) => (Number(n) || 0).toLocaleString('zh-CN');
 
   async function fetchAll() {
     const [u, r] = await Promise.all([
@@ -97,15 +105,15 @@
     const avgMs = t.msCount ? t.msSum / t.msCount : 0;
     const cacheHit = (t.input + t.cacheRead) > 0 ? (t.cacheRead / (t.input + t.cacheRead)) * 100 : 0;
     return '<div class="kpi-row">' +
-      tile('请求数', U.fmtInt(t.requests || 0), '', '近 ' + DATA.days + ' 天') +
+      tile('请求数', U.fmtInt(t.requests || 0), '', T('近 {n} 天', { n: DATA.days })) +
       tile('成功率', t.requests ? okRate + '%' : '—', t.requests && okRate < 90 ? 'is-warn' : 'is-good',
-           U.fmtInt(t.success || 0) + ' 成功 / ' + U.fmtInt((t.requests || 0) - (t.success || 0)) + ' 失败') +
-      tile('输入 Token', fmtTok(t.input), '', fmtTokExact(t.input) + ' 原始输入', fmtTokExact(t.input)) +
-      tile('输出 Token', fmtTok(t.output), '', fmtTokExact(t.output) + ' 原始输出', fmtTokExact(t.output)) +
-      tile('缓存命中', fmtTok(t.cacheRead), '', cacheHit ? cacheHit.toFixed(1) + '% 命中率' : '暂无缓存',
-           fmtTokExact(t.cacheRead) + ' 缓存读取' + (t.cacheCreation ? '，' + fmtTokExact(t.cacheCreation) + ' 缓存写入' : '')) +
+           T('{a} 成功 / {b} 失败', { a: U.fmtInt(t.success || 0), b: U.fmtInt((t.requests || 0) - (t.success || 0)) })) +
+      tile('输入 Token', fmtTok(t.input), '', T('{n} 原始输入', { n: fmtTokExact(t.input) }), fmtTokExact(t.input)) +
+      tile('输出 Token', fmtTok(t.output), '', T('{n} 原始输出', { n: fmtTokExact(t.output) }), fmtTokExact(t.output)) +
+      tile('缓存命中', fmtTok(t.cacheRead), '', cacheHit ? T('{n}% 命中率', { n: cacheHit.toFixed(1) }) : '暂无缓存',
+           fmtTokExact(t.cacheRead) + ' ' + T('缓存读取') + (t.cacheCreation ? '，' + fmtTokExact(t.cacheCreation) + ' ' + T('缓存写入') : '')) +
       tile('花费', fmtCost(t.cost), '', costSub(t), costTitle(t)) +
-      tile('平均耗时', avgMs ? U.fmtMs(avgMs) : '—', '', t.msCount ? U.fmtInt(t.msCount) + ' 次样本' : '暂无样本') +
+      tile('平均耗时', avgMs ? U.fmtMs(avgMs) : '—', '', t.msCount ? T('{n} 次样本', { n: U.fmtInt(t.msCount) }) : '暂无样本') +
     '</div>';
   }
 
@@ -113,14 +121,14 @@
   // 混在一起会让人以为总额都是账单上的数
   function costSub(t) {
     if (!t.cost) return '暂无计费数据';
-    if (t.costEstimated > 0 && t.costReal > 0) return '真实 ' + fmtCost(t.costReal) + ' + 估算 ' + fmtCost(t.costEstimated);
+    if (t.costEstimated > 0 && t.costReal > 0) return T('真实 {a} + 估算 {b}', { a: fmtCost(t.costReal), b: fmtCost(t.costEstimated) });
     if (t.costReal > 0) return '全部来自上游真实账单';
     return '全部为定价表估算';
   }
   function costTitle(t) {
     const parts = [];
-    if (t.costReal) parts.push('上游真实���本：' + fmtCost(t.costReal));
-    if (t.costEstimated) parts.push('定价表估算：' + fmtCost(t.costEstimated));
+    if (t.costReal) parts.push(T('上游真实成本：') + fmtCost(t.costReal));
+    if (t.costEstimated) parts.push(T('定价表估算：') + fmtCost(t.costEstimated));
     return parts.join('；');
   }
 
@@ -162,7 +170,7 @@
     return '<div class="spark-row">' +
       '<div class="spark-head"><span class="spark-label">' + U.esc(label) + '</span>' +
         '<span class="spark-total">' + U.esc((axisFmt || U.fmtInt)(total)) +
-        ' <span class="muted" style="font-weight:400">合计</span></span></div>' +
+        ' <span class="muted" style="font-weight:400">' + T('合计') + '</span></span></div>' +
       '<div class="spark-wrap">' +
         '<svg class="spark" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
           '<polygon points="' + area + '" fill="' + color + '" opacity="0.14"/>' +
@@ -170,7 +178,7 @@
             'vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>' +
         '</svg>' +
         '<div class="spark-axis"><span>' + U.esc(daily[0].date.slice(5)) + '</span>' +
-          '<span class="muted">峰值 ' + U.esc(fmt({ ...last, ...agg(daily[peakIdx]) })) + '（' + U.esc(daily[peakIdx].date.slice(5)) + '）</span>' +
+          '<span class="muted">' + T('峰值') + ' ' + U.esc(fmt({ ...last, ...agg(daily[peakIdx]) })) + '（' + U.esc(daily[peakIdx].date.slice(5)) + '）</span>' +
           '<span>' + U.esc(last.date.slice(5)) + '</span></div>' +
       '</div></div>';
   }
@@ -242,7 +250,7 @@
       ? RECORDS.filter((r) => String(r.model || '').includes(REC_FILTER))
       : RECORDS;
     const head = '<div class="card tight"><div class="card-head"><div class="card-title">请求明细</div>' +
-      '<div class="card-note">最近 ' + U.fmtInt(RECORDS.length) + ' 条（引擎保留 ' + U.fmtInt(DATA.detailLines || 0) + ' 条）</div></div>' +
+      '<div class="card-note">' + T('最近 {a} 条（引擎保留 {b} 条）', { a: U.fmtInt(RECORDS.length), b: U.fmtInt(DATA.detailLines || 0) }) + '</div></div>' +
       '<div class="row-gap" style="margin-bottom:10px">' +
         '<input class="input" id="useFilter" style="max-width:240px" placeholder="按模型名筛选…" value="' + U.esc(REC_FILTER) + '">' +
         '<button class="btn btn-sm" data-act="clear-filter">清除</button>' +
@@ -347,9 +355,10 @@
       if (!DATA) return '请求量、Token、缓存与花费';
       const t = DATA.totals || {};
       const avail = DATA.available || {};
-      return '近 ' + DATA.days + ' 天 ' + U.fmtInt(t.requests || 0) + ' 次请求 · ' +
-        '累计 ' + U.fmtInt(t.input + t.output + t.cacheRead) + ' token · ' + fmtCost(t.cost) +
-        (avail.from ? '（数据自 ' + avail.from + ' 起）' : '');
+      return T('近 {d} 天 {r} 次请求 · 累计 {k} token · {c}', {
+        d: DATA.days, r: U.fmtInt(t.requests || 0),
+        k: U.fmtInt(t.input + t.output + t.cacheRead), c: fmtCost(t.cost),
+      }) + (avail.from ? T('（数据自 {d} 起）', { d: avail.from }) : '');
     },
     actions: () => '<button class="btn btn-sm" data-act="scan" title="把 Claude Code 已有的会话历史补进统计（不开代理也能统计）">扫描会话记录</button>' +
       '<button class="btn btn-sm" data-act="refresh">刷新</button>',

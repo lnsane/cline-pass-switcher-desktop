@@ -73,6 +73,9 @@
   }
 
   function renderDesktop() {
+    const langMode = (window.I18N && window.I18N.mode) || 'auto';
+    const sysLang = (window.I18N && window.I18N.detectSystem()) || 'zh';
+    const opt = (v, label) => '<option value="' + v + '"' + (langMode === v ? ' selected' : '') + '>' + U.esc(label) + '</option>';
     return '<div class="card">' +
       '<div class="card-head"><div class="card-title">桌面应用</div>' +
         '<div class="card-note">本机行为，不影响代理</div></div>' +
@@ -83,6 +86,16 @@
       '<label class="switch"><input type="checkbox" id="setMinToTray" ' + (appSettings.minimizeToTray ? 'checked' : '') + '><span class="track"></span>' +
         '<span class="switch-label">点最小化时隐藏到托盘</span></label>' +
       '<div class="field-hint" style="margin-top:8px">关掉「关闭到托盘」后，点窗口右上角关闭按钮会同时退出代理（托盘图标也随之消失）。</div>' +
+      // 界面语言：默认跟随系统，可手动指定
+      '<div class="field" style="margin-top:14px;max-width:340px">' +
+        '<label class="field-label">界面语言</label>' +
+        '<select class="select" id="setLang">' +
+          opt('auto', '跟随系统（当前：' + (sysLang === 'zh' ? '中文' : 'English') + '）') +
+          opt('zh', '中文') +
+          opt('en', 'English') +
+        '</select>' +
+        '<div class="field-hint">切换后立即生效，并会记住选择。界面语言不影响模型回复的语言。</div>' +
+      '</div>' +
     '</div>';
   }
 
@@ -206,6 +219,15 @@
         U.toast('已' + (el.checked ? '开启' : '关闭'), 'ok');
       });
     }
+
+    // 界面语言。切换会整页重载（原因见 i18n.js 的 setMode），
+    // 所以这里只需存好选择 —— 重载后 boot() 会读它。
+    const langEl = U.$('#setLang', root);
+    if (langEl) U.on(langEl, 'change', async () => {
+      await window.cp.settings.set({ language: langEl.value });
+      U.toast(langEl.value === 'zh' ? '界面语言已切换为中文' : 'Interface language set to English', 'ok');
+      window.I18N.setMode(langEl.value);
+    });
   }
 
   window.VIEWS = window.VIEWS || {};
