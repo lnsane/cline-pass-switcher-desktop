@@ -81,27 +81,38 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
 
 // ---------- 3) 按天 / 按小时汇总 ----------
 {
+  // 注意：hourKey/dayKey 用的是**本机时区**（用户看到的「今天」是他自己的今天），
+  // 所以这里的期望值必须用同一个函数算出来，不能写死 'T09' 这种字面量 ——
+  // 那样在 UTC+8 的本机跑得通，到 UTC 的 CI 上就全错（这个坑已经被 CI 抓到过一次）。
+  const tsAt9 = bj(2026, 9, 26, 9, 0);
+  const tsAt15 = bj(2026, 9, 26, 15, 0);
+  const tsAt0 = bj(2026, 9, 26, 0, 0);
+  const kAt9 = hourKey(tsAt9);
+  const kAt15 = hourKey(tsAt15);
+  const kAt0 = hourKey(tsAt0);
+
   const d = store.daily;
-  ok(d['2026-09-26'], '3.1 有 2026-09-26 当天的桶');
+  ok(d[dayKey(tsAt9)], '3.1 有当天（本机时区）的按天桶');
   const h = store.hourly;
-  ok(h['2026-09-26T09'], '3.2 有 09 点的小时桶');
-  ok(h['2026-09-26T15'], '3.3 有 15 点的小时桶');
-  eq(hourKey(bj(2026, 9, 26, 9, 30)), '2026-09-26T09', '3.4 hourKey 取整点');
-  eq(dayKey(bj(2026, 9, 26, 23, 59)), '2026-09-26', '3.5 dayKey 当天');
+  ok(h[kAt9], '3.2 有 09 点（北京）那条记录所在的小时桶');
+  ok(h[kAt15], '3.3 有 15 点（北京）那条记录所在的小时桶');
+  eq(hourKey(bj(2026, 9, 26, 9, 30)), kAt9, '3.4 hourKey 取整点（半小时归到同一小时）');
+  eq(dayKey(bj(2026, 9, 26, 23, 59)), dayKey(tsAt9), '3.5 dayKey 取当天（当天最后一分钟仍算当天）');
 
   // 小时桶合计要等于当天总量（两套汇总必须一致，否则界面两个图对不上）
-  const hourSum = Object.entries(h).filter(([k]) => k.startsWith('2026-09-26'))
+  const dayOf = dayKey(tsAt9);
+  const hourSum = Object.entries(h).filter(([k]) => k.startsWith(dayOf))
     .reduce((n, [, v]) => n + Object.values(v.rollups).reduce((a, r) => a + r.requests, 0), 0);
-  const daySum = Object.values(d['2026-09-26'].rollups).reduce((a, r) => a + r.requests, 0);
+  const daySum = Object.values(d[dayOf].rollups).reduce((a, r) => a + r.requests, 0);
   eq(hourSum, daySum, '3.6 小时合计 = 当天合计');
 
-  // 跨小时分布：09 点 1 条（e2e-early），15 点 1 条（e2e-late），0 点 60 条（bulk）
-  const at9 = Object.values(h['2026-09-26T09'].rollups).reduce((a, r) => a + r.requests, 0);
-  const at15 = Object.values(h['2026-09-26T15'].rollups).reduce((a, r) => a + r.requests, 0);
-  const at0 = Object.values(h['2026-09-26T00'].rollups).reduce((a, r) => a + r.requests, 0);
-  eq(at9, 1, '3.7 09 点 1 条');
-  eq(at15, 1, '3.8 15 点 1 条');
-  eq(at0, 60, '3.9 0 点 60 条');
+  // 跨小时分布：09 点（北京）1 条（e2e-early），15 点 1 条（e2e-late），0 点 60 条（bulk）
+  eq(Object.values(h[kAt9].rollups).reduce((a, r) => a + r.requests, 0), 1, '3.7 09 点 1 条');
+  eq(Object.values(h[kAt15].rollups).reduce((a, r) => a + r.requests, 0), 1, '3.8 15 点 1 条');
+  eq(Object.values(h[kAt0].rollups).reduce((a, r) => a + r.requests, 0), 60, '3.9 0 点 60 条');
+
+  // 三个小时键必须互不相同（本机时区偏移下也不能撞到一起）
+  eq(new Set([kAt0, kAt9, kAt15]).size, 3, '3.10 三个小时落在三个不同的桶');
 }
 
 // ---------- 4) 人民币计价 ----------
@@ -174,19 +185,24 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
 // ---------- 8) 小时桶不会无限增长 ----------
 {
   const s3 = createUsageStore(path.join(tmp, 'usage3'));
+  const dayKeys = new Set();
   for (let d = 0; d < 12; d++) {
     for (let h = 0; h < 24; h++) {
-      s3.add({ id: `hb-${d}-${h}`, ts: bj(2026, 9, 1 + d, h, 0), source: 'proxy', model: 'k3', input: 1, output: 1 });
+      const ts = bj(2026, 9, 1 + d, h, 0);
+      dayKeys.add(dayKey(ts));
+      s3.add({ id: `hb-${d}-${h}`, ts, source: 'proxy', model: 'k3', input: 1, output: 1 });
     }
   }
   const keys = Object.keys(s3.hourly);
   ok(keys.length <= 4 * 24, `8.1 小时桶被裁剪到 4 天以内（实际 ${keys.length}）`);
   ok(keys.length > 0, '8.2 还留着最近的小时桶');
-  // 最近的必须留着
-  const lastKey = keys.sort()[keys.length - 1];
-  ok(lastKey.startsWith('2026-09-12'), `8.3 保留的是最近的（最老为 ${keys.sort()[0]}）`);
-  // 按天汇总不受小时裁剪影响
-  eq(Object.keys(s3.daily).length, 12, '8.4 按天汇总完整保留 12 天');
+  // 最近的必须留着：最后一个写入日对应的小时键应当还在
+  const lastDayKey = dayKey(bj(2026, 9, 12, 12, 0));
+  ok(keys.some((k) => k.startsWith(lastDayKey)), `8.3 保留的是最近的（最后一天 ${lastDayKey}）`);
+  // 按天汇总不受小时裁剪影响。天数是「本机时区下实际出现的日期数」——
+  // 北京时区的 12 天跨到 UTC 可能压在 13 个日期上（反之亦然），所以用实测集合而不是写死 12。
+  eq(Object.keys(s3.daily).length, dayKeys.size, `8.4 按天汇总完整保留（${dayKeys.size} 个本地日期）`);
+  ok(dayKeys.size >= 12, '8.5 至少覆盖 12 个日期');
 }
 
 // ---------- 9) 「当天」的小时起点 ----------
@@ -223,15 +239,18 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
 {
   const { dayKey } = await import('../src/main/engine/usage.js');
   const s4 = createUsageStore(path.join(tmp, 'usage4'));
-  s4.add({ id: 'av-1', ts: bj(2026, 9, 21, 3, 0), source: 'proxy', model: 'k3', input: 1, output: 1 });
-  s4.add({ id: 'av-2', ts: bj(2026, 9, 26, 15, 0), source: 'proxy', model: 'k3', input: 1, output: 1 });
+  const tA = bj(2026, 9, 21, 3, 0);
+  const tB = bj(2026, 9, 26, 15, 0);
+  s4.add({ id: 'av-1', ts: tA, source: 'proxy', model: 'k3', input: 1, output: 1 });
+  s4.add({ id: 'av-2', ts: tB, source: 'proxy', model: 'k3', input: 1, output: 1 });
   const allDays = Object.keys(s4.daily).sort();
   ok(allDays.every((k) => k.length === 10), '10.1 按天键是 10 位日期，不含小时');
-  eq(allDays[0], '2026-09-21', '10.2 available.from 是最早那天');
-  eq(allDays[allDays.length - 1], '2026-09-26', '10.3 available.to 是最晚那天');
+  // 用 dayKey 算期望值（本机时区），不写死日期
+  eq(allDays[0], dayKey(tA), '10.2 available.from 是最早那天');
+  eq(allDays[allDays.length - 1], dayKey(tB), '10.3 available.to 是最晚那天');
   // 小时键确实带小时 —— 所以绝不能用它填 available
   ok(Object.keys(s4.hourly).some((k) => k.length > 10), '10.4 小时键比天键长（两者不能混用）');
-  eq(dayKey(Date.parse('2026-09-21T03:00:00Z')), '2026-09-21', '10.5 dayKey 抹掉小时');
+  eq(dayKey(bj(2026, 9, 21, 3, 30)), dayKey(tA), '10.5 dayKey 抹掉小时（同一小时内同一天）');
 }
 
 
@@ -261,13 +280,14 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
 
   const s5 = createUsageStore(dir5);
   s5.prime();
+  const dayOfOld = dayKey(bj5(2026, 9, 28, 3));   // 本机时区下的那一天，别写死字面量
   eq(Object.keys(s5.daily).length, 0, '11.1 重算前没有汇总（老数据只有明细）');
   const rc = s5.recompute();
   eq(rc.records, 11, '11.2 重算覆盖全部记录');
   eq(rc.days, 1, '11.3 建出了 1 天的汇总');
   // 10 条 DeepSeek，每条 空闲价 = 1e6 未命中(¥1) + 1e6 输出(¥4) = ¥5
   near(rc.cny, 50, '11.4 人民币合计 = 10 × ¥5 = ¥50');
-  const sum = Object.values(s5.daily['2026-09-28'].rollups).reduce((a, r) => a + (r.costCny || 0), 0);
+  const sum = Object.values(s5.daily[dayOfOld].rollups).reduce((a, r) => a + (r.costCny || 0), 0);
   near(sum, 50, '11.5 汇总里读回同一个数');
   ok(rc.changed > 0, '11.6 报告了被改写的条数');
   // 幂等
