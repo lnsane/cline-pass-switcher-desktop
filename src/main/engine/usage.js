@@ -335,11 +335,30 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
   // 而文件顺序不等于时间顺序（实测 1701 条里有 57 条乱序）。明细接口若只把文件尾部
   // 当成「最近 N 条」，就会漏掉真正最新的记录、又混进旧的 —— 这正是「倒序」要修的问题。
   // 有了 n 就能按「写入先后」倒序取，和从尾部读的做法天然一致。
+  // 追加前先确认文件以换行结尾。若上一条记录写了一半就崩了（末行没有换行），
+  // 直接 append 会把新记录**粘在那半行后面**，两行合起来永远解析不了 ——
+  // 那条新请求明明已经计费、也进了汇总、还触发了实时推送，却从明细里彻底消失。
+  // 补一个换行就把粘连切断：坏行还是坏行（会被跳过），新记录是完整的一行。
+  function appendLines(text) {
+    let prefix = '';
+    try {
+      const st = fs.statSync(DETAIL);
+      if (st.size > 0) {
+        const fd = fs.openSync(DETAIL, 'r');
+        const buf = Buffer.alloc(1);
+        fs.readSync(fd, buf, 0, 1, st.size - 1);
+        fs.closeSync(fd);
+        if (buf[0] !== 0x0a) prefix = '\n';
+      }
+    } catch { /* 文件不存在或读不了：当作空文件，不补前缀 */ }
+    fs.appendFileSync(DETAIL, prefix + text);
+  }
+
   function add(entry) {
     const id = entry.id ? String(entry.id) : null;
     if (id && seenIds.has(id)) return false;
     if (id) seenIds.add(id);
-    fs.appendFileSync(DETAIL, JSON.stringify({ ...entry, n: ++seq }) + '\n');
+    appendLines(JSON.stringify({ ...entry, n: ++seq }) + '\n');
     detailLines += 1;
     fs.writeFileSync(DAILY, JSON.stringify(bumpDaily(entry)));
     fs.writeFileSync(HOURLY, JSON.stringify(bumpHourly(entry)));
@@ -356,7 +375,7 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       fresh.push(e);
     }
     if (!fresh.length) return 0;
-    fs.appendFileSync(DETAIL, fresh.map((e) => JSON.stringify({ ...e, n: ++seq })).join('\n') + '\n');
+    appendLines(fresh.map((e) => JSON.stringify({ ...e, n: ++seq })).join('\n') + '\n');
     detailLines += fresh.length;
     let d = null; let h = null;
     for (const e of fresh) { d = bumpDaily(e); h = bumpHourly(e); }
@@ -420,24 +439,39 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
   // 同时把每条明细的 costCny / costCnyPeak 补写回去：这样单条记录的花费
   // 与汇总口径一致，不会出现「明细说 ¥0.01、当天合计说 ¥0」的矛盾。
   //
-  // 幂等：重算是「从 token 重新推一遍」，跑几次结果都一样；金额不叠加、只覆盖。
-  // 明细行数很多时（十万级）会慢，所以调用方按需触发，不要每次启动都跑。
+  // 幂等：重算只按**差值**调整汇总（新算出的 costCny 减去这条已经累计过的），
+  // 跑几次结果都一样，不会叠加。
+  //
+  // 为什么不「从明细重建汇总」（第一版就是这么写的，是个真 bug）：
+  // 汇总**刻意**比明细活得久 —— `compact()` 删掉 90 天前的明细时，
+  // 按天汇总必须保留（界面上写着「按天汇总与总计不受影响」）。
+  // 所以拿明细重建汇总，等于把 compact 删掉的那些历史一并抹掉：
+  // 一年历史会缩成 90 天，而且不可恢复（明细已经没了）。
+  // 走差值就只碰「每条自己那部分」，没明细的桶原样不动。
   function recompute({ withDetail = true } = {}) {
-    if (!fs.existsSync(DETAIL)) return { records: 0, days: 0, hours: 0, cny: 0 };
+    if (!fs.existsSync(DETAIL)) return { records: 0, days: 0, hours: 0, cny: 0, changed: 0 };
     const raw = fs.readFileSync(DETAIL, 'utf8');
     const lines = raw.split('\n');
-    const nextDaily = {};
-    const nextHourly = {};
+    const d = loadDaily();
+    const h = loadHourly();
+    // 汇总是不是「根本没有」。
+    // 只有在**完全没有汇总**时才允许按整条重建（新装的库、汇总文件被删）。
+    // 一旦汇总非空，就只能走差值 —— 因为汇总里可能含有明细已经被 compact 掉的
+    // 历史，那不是「缺失」而是「刻意保留」；反过来按明细重建会与它重复计数。
+    // 这两种状态从外面看长得一样（都是「这条记录在汇总里找不到对应分桶」），
+    // 所以只能靠「汇总整体是否为空」来区分。
+    const hasSummary = Object.keys(d).length > 0 || Object.keys(h).length > 0;
     const rewritten = [];
-    let count = 0;
-    let cnyTotal = 0;
+    let count = 0;       // 能解析的记录数
+    let kept = 0;        // 原样保留的行数（含坏行）—— 明细行数要按它算
     let changed = 0;
 
     for (const l of lines) {
       if (!l) continue;
       let o = null;
-      try { o = JSON.parse(l); } catch { rewritten.push(l); continue; }
+      try { o = JSON.parse(l); } catch { rewritten.push(l); kept += 1; continue; }
       count += 1;
+      kept += 1;
       // 重算这条的人民币（认不出的模型得 null，保持 null）
       const cny = deepseekCostCny(o.model, {
         input: o.input, output: o.output, cacheRead: o.cacheRead,
@@ -445,6 +479,9 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       }, o.ts);
       const val = cny ? cny.cost : null;
       const peak = cny ? cny.peak : null;
+      const had = Number(o.costCny) || 0;          // 这条此前已经累计进汇总的金额
+      const hadPeak = o.costCnyPeak === true;      // 此前它算不算「高峰那一部分」
+      const nowPeak = cny ? !!cny.peak : false;
       if (o.costCny !== val || o.costCnyPeak !== peak) {
         o.costCny = val;
         o.costCnyPeak = peak;
@@ -453,29 +490,79 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       // 序号缺失的老记录补上（倒序读取依赖 n）
       if (typeof o.n !== 'number') { o.n = seq + 1; seq += 1; changed += 1; }
       if (o.n > seq) seq = o.n;
-      if (val != null) cnyTotal += val;
 
-      // 累加进新的汇总
-      bumpInto(nextDaily, dayKey(o.ts), o);
-      bumpInto(nextHourly, hourKey(o.ts), o);
+      // 同步这条记录对汇总的贡献。两种情况要分开处理，缺一不可：
+      //   - 桶里已经有这条记录 → 只按**差值**调整人民币（其余字段已经计过，不能重复计）
+      //   - 桶里没有（汇总整个丢了、或这条从没进过汇总）→ 按整条重建
+      // 只做差值的话，汇总为空的库（新装、或汇总文件被删）永远建不起来；
+      // 只做重建的话，compact 删掉明细的那些历史会被抹掉。两个方向都得覆盖。
+      const delta = (val || 0) - had;
+      const deltaPeak = (nowPeak ? (val || 0) : 0) - (hadPeak ? had : 0);
+      syncCnyBucket(d, dayKey(o.ts), o, delta, deltaPeak, hasSummary);
+      syncCnyBucket(h, hourKey(o.ts), o, delta, deltaPeak, hasSummary);
       rewritten.push(withDetail ? JSON.stringify(o) : l);
     }
 
-    // 小时桶同样保留最近 4 天
-    const hk = Object.keys(nextHourly).sort();
-    if (hk.length > 4 * 24) for (const k of hk.slice(0, hk.length - 4 * 24)) delete nextHourly[k];
+    // 小时桶仍按「最近 4 天」裁剪：重建路径可能把很久以前的小时又加回来
+    const hk2 = Object.keys(h).sort();
+    if (hk2.length > 4 * 24) for (const k of hk2.slice(0, hk2.length - 4 * 24)) delete h[k];
 
-    daily = nextDaily;
-    hourly = nextHourly;
-    fs.writeFileSync(DAILY, JSON.stringify(daily));
-    fs.writeFileSync(HOURLY, JSON.stringify(hourly));
+    // 顺序很重要：先把汇总落盘、**再**动明细文件。
+    // 反过来的话，若在两步之间进程被杀，磁盘上就是「新汇总 + 有坏行的旧明细」对不上
+    // 的状态；按这个顺序最多重算没生效，下次再点一次即可（幂等）。
+    fs.writeFileSync(DAILY, JSON.stringify(d));
+    fs.writeFileSync(HOURLY, JSON.stringify(h));
     if (withDetail && changed) {
       const tmp = DETAIL + '.tmp';
+      // 结尾补换行：末行若没有换行（写入中崩溃留下的半行），
+      // 下一条 append 会**粘在它后面**，两行一起变成永远解析不了的坏行 —— 那条记录
+      // 明明已经被计费、也进了汇总，却从明细里消失。补上换行就切断了这种粘连。
       fs.writeFileSync(tmp, rewritten.join('\n') + '\n');
       fs.renameSync(tmp, DETAIL);
     }
-    detailLines = count;
-    return { records: count, changed, days: Object.keys(daily).length, hours: Object.keys(hourly).length, cny: cnyTotal };
+    // 行数按「实际保留的行数」算，不是「能解析的条数」——
+    // 否则界面上「引擎保留 N 条」会与应用列出的条数对不上。
+    detailLines = kept;
+    // 报告的人民币总额取自**汇总**，不是「明细逐条相加」——
+    // 汇总里还留着明细已被 compact 掉的历史，两者本就不该相等；
+    // 拿明细之和去报会少报，界面上会和卡片里的合计对不上。
+    let cnyTotal = 0;
+    for (const day of Object.values(d)) {
+      for (const r of Object.values(day.rollups || {})) cnyTotal += Number(r.costCny) || 0;
+    }
+    return { records: count, kept, changed, days: Object.keys(d).length, hours: Object.keys(h).length, cny: cnyTotal };
+  }
+
+  // 把一条记录同步进某个桶。
+  //
+  // hasSummary=false（汇总整体为空）→ 按整条重建：新装的库、汇总文件被删的情况，
+  //   不重建就永远没有汇总。
+  // hasSummary=true → 只调人民币差值。**绝不按整条重建**：汇总里可能含有明细已被
+  //   compact 掉的同一批记录（compact 刻意保留汇总），按明细重建会与它重复计数，
+  //   请求数、token、金额全部翻倍。
+  function syncCnyBucket(bucketMap, keyName, entry, delta, deltaPeak, hasSummary) {
+    if (!hasSummary) {
+      bumpInto(bucketMap, keyName, entry);
+      return;
+    }
+    const bucket = bucketMap[keyName];
+    // 这条记录所属的日期/小时整个不在汇总里：它要么是明细被 compact 掉的老记录，
+    // 要么是时间上晚于快照时间戳的那一条。无论哪种，按整条加进去都是对的 ——
+    // 因为汇总里根本没有它那个桶，不存在重复计数的对象。
+    if (!bucket) {
+      bumpInto(bucketMap, keyName, entry);
+      return;
+    }
+    const r = bucket.rollups[rollupKey(entry)];
+    if (!r) {
+      // 桶在、但缺这个分桶。上面两种歧义在这里都可能：为了不重复计数，
+      // 宁可少建也不能凭空把整条加进去（少建的分桶只是钱少算，重复计会把总数算翻倍）。
+      return;
+    }
+    if (delta !== 0 || deltaPeak !== 0) {
+      r.costCny = (Number(r.costCny) || 0) + delta;
+      r.costCnyPeak = (Number(r.costCnyPeak) || 0) + deltaPeak;
+    }
   }
 
   // 按写入序号倒序读明细：从文件尾部往前扫，天然就是「最新的在前」。

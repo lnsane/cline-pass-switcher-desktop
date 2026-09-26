@@ -355,6 +355,102 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
   eq(near2.truncated, false, '13.8 能取到时不误报 truncated');
 }
 
+// ---------- 14) recompute 不能抹掉 compact 保留的历史（H1）----------
+// 回归：第一版 recompute 是「从明细重建汇总」。但汇总**刻意**比明细活得久 ——
+// compact 删掉 90 天前的明细时按天汇总必须保留（界面上就这么写的）。
+// 重建等于把删掉的历史一并抹掉：一年历史缩成 90 天，且不可恢复��
+{
+  const dir7 = path.join(tmp, 'usage7');
+  const s7 = createUsageStore(dir7);
+  s7.add({ id: 'h1-old', ts: Date.now() - 200 * 86400e3, source: 'proxy', model: 'deepseek-flash', input: 1e6, output: 1e6 });
+  s7.add({ id: 'h1-new', ts: Date.now(), source: 'proxy', model: 'deepseek-flash', input: 1e6, output: 1e6 });
+
+  const daysBefore = Object.keys(s7.daily).length;
+  const reqOf = (st) => Object.values(st.daily).reduce((n, d) => n + Object.values(d.rollups).reduce((a, r) => a + r.requests, 0), 0);
+  const reqBefore = reqOf(s7);
+
+  const c = s7.compact({ keepDays: 90 });
+  eq(c.removed, 1, '14.1 compact 删掉了那条老明细');
+  eq(Object.keys(s7.daily).length, daysBefore, '14.2 compact 不动按天汇总');
+  eq(reqOf(s7), reqBefore, '14.3 compact 后请求数不变');
+
+  s7.recompute();
+  eq(Object.keys(s7.daily).length, daysBefore, '14.4 ★ recompute 后仍保留全部日期（不被重建抹掉）');
+  eq(reqOf(s7), reqBefore, '14.5 ★ recompute 后请求数不变');
+  // 存活的那条要被补上人民币
+  const cny = Object.values(s7.daily).reduce((n, d) => n + Object.values(d.rollups).reduce((a, r) => a + (r.costCny || 0), 0), 0);
+  near(cny, 5, '14.6 存活的记录被补上 ¥5（空闲价 1M×¥1 + 1M×¥4）');
+  // 再跑一次不能叠加
+  s7.recompute();
+  const cny2 = Object.values(s7.daily).reduce((n, d) => n + Object.values(d.rollups).reduce((a, r) => a + (r.costCny || 0), 0), 0);
+  near(cny2, cny, '14.7 再跑一次金额不变（差值法不叠加）');
+}
+
+// ---------- 15) 汇总为空的库仍能从明细重建（H1 的反向）----------
+// 只做差值的话，汇总文件丢了/新装的库永远建不起来。
+{
+  const dir8 = path.join(tmp, 'usage8');
+  const s8 = createUsageStore(dir8);
+  const b = [];
+  for (let i = 0; i < 10; i++) b.push({ id: 'h2-' + i, ts: bj(2026, 9, 28, 3), source: 'proxy', model: 'deepseek-flash', input: 1e6, output: 1e6 });
+  s8.addMany(b);
+  // 删掉汇总文件，模拟「汇总丢失」，然后重算
+  fs.rmSync(path.join(dir8, 'usage_daily.json'));
+  fs.rmSync(path.join(dir8, 'usage_hourly.json'));
+  const s9 = createUsageStore(dir8);
+  s9.prime();
+  const r9 = s9.recompute();
+  eq(r9.days, 1, '15.1 汇总为空时能从明细重建出按天汇总');
+  const reqs = Object.values(s9.daily).reduce((n, d) => n + Object.values(d.rollups).reduce((a, x) => a + x.requests, 0), 0);
+  eq(reqs, 10, '15.2 重建后请求数正确（10 条）');
+  near(r9.cny, 50, '15.3 人民币也一起建起来了（10 × ¥5）');
+}
+
+// ---------- 16) 末行缺换行时，新记录不能被粘成坏行（H2）----------
+// 回归：上一条写了一半就崩（末行无换行）时，直接 append 会把新记录粘在它后面，
+// 两行合起来永远解析不了 —— 那条请求已计费、已进汇总、还推送了，却从明细里消失。
+{
+  const dir9 = path.join(tmp, 'usage9');
+  fs.mkdirSync(dir9, { recursive: true });
+  const f9 = path.join(dir9, 'usage.jsonl');
+  fs.writeFileSync(f9, JSON.stringify({ id: 'ok1', ts: bj(2026, 9, 28, 3), source: 'proxy', model: 'k3', input: 1, output: 1 }) + '\n');
+  fs.appendFileSync(f9, '{"id":"TORN","ts":1');   // 半行，无换行
+
+  const s10 = createUsageStore(dir9);
+  s10.prime();
+  s10.add({ id: 'after-torn', ts: bj(2026, 9, 28, 4), source: 'proxy', model: 'k3', input: 1, output: 1 });
+
+  const raw9 = fs.readFileSync(f9, 'utf8');
+  const parsed = [];
+  for (const l of raw9.split('\n').filter(Boolean)) { try { parsed.push(JSON.parse(l)); } catch { /* 坏行 */ } }
+  const ids = parsed.map((o) => o.id);
+  ok(ids.includes('after-torn'), '16.1 ★ 崩溃后写入的新记录能被解析到（没被粘在坏行后面）');
+  ok(ids.includes('ok1'), '16.2 之前的完好记录还在');
+  // 坏行仍然存在（不静默删用户数据），但不影响新记录
+  ok(raw9.includes('TORN'), '16.3 坏行被原样保留（没有静默删除）');
+  // 明细接口应当能列出这条
+  const listed = s10.recentRecords({ limit: 10 }).records.map((r) => r.id);
+  ok(listed.includes('after-torn'), '16.4 新记录出现在明细列表里');
+}
+
+// ---------- 17) detailLines 要与实际保留的行数一致（H3）----------
+{
+  const dir10 = path.join(tmp, 'usage10');
+  fs.mkdirSync(dir10, { recursive: true });
+  const f10 = path.join(dir10, 'usage.jsonl');
+  const rows = [];
+  for (let i = 0; i < 5; i++) rows.push(JSON.stringify({ id: 'p' + i, ts: bj(2026, 9, 28, 3), source: 'proxy', model: 'k3', input: 1, output: 1 }));
+  fs.writeFileSync(f10, rows.join('\n') + '\n');
+  fs.appendFileSync(f10, '{"id":"TORN"');   // 半行
+
+  const s11 = createUsageStore(dir10);
+  s11.prime();
+  s11.recompute();
+  const actual = fs.readFileSync(f10, 'utf8').split('\n').filter(Boolean).length;
+  eq(s11.lines, actual, '17.1 ★ detailLines 与实际保留行数一致（含坏行）');
+  ok(s11.lines === 6, '17.2 5 条好记录 + 1 条坏行 = 6');
+}
+
 // ---------- 结果 ----------
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 清理失败无妨 */ }
 console.log(`\n用量统计端到端：通过 ${pass} 项，失败 ${fail} 项`);
