@@ -77,13 +77,26 @@ node src/main/engine/engine.js   # run just the CLI engine (equivalent to the or
 
 Building (not packaging) is much faster and is unaffected by code-signing restrictions:
 
+```bat
+scripts\build-win.bat              :: Windows: dist\win-unpacked\Cline Pass Switcher.exe
+```
+
 ```bash
-bash scripts/build-win.sh          # Windows: dist/win-unpacked/Cline Pass Switcher.exe
 bash scripts/build-mac.sh          # macOS:   dist/mac*/Cline Pass Switcher.app
 ```
 
-Both accept `--clean` (wipe `dist/` first) and `--run` (launch when done); the macOS script also
+On Windows you can just **double-click** `scripts\build-win.bat`, or run it from cmd. Both
+accept `--clean` (wipe `dist/` first) and `--run` (launch when done); the macOS script also
 takes `--arm64` / `--x64`.
+
+> **Windows users**: `build-win.sh` needs bash and will not run on Windows — use the `.bat`.
+> Each script only builds for its own platform (Windows can't produce a mac bundle, and vice
+> versa); push a tag to let CI build the other one.
+
+> **A running instance is protected**: if you're currently using the app from
+> `dist\win-unpacked\` (often the everyday copy, possibly holding your proxy port), the script
+> **stops and tells you which PIDs** instead of deleting those files or killing the process for
+> you. Quit that instance first, or use `--run` to have the script relaunch it afterwards.
 
 To produce real installers locally:
 
@@ -436,7 +449,7 @@ BASE=http://127.0.0.1:3251 KEY=<proxy key> npm run test:e2e
   `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`; events land in
   `Microsoft-Windows-CodeIntegrity/Operational` as ID 3118). The **unpacked build and the portable
   executable are unaffected** — this is an environment restriction, not a defect. Options: use the
-  portable build, run the unpacked output of `scripts/build-win.sh`, or turn Smart App Control off
+  portable build, run the unpacked output of `scripts/build-win.bat`, or turn Smart App Control off
   (irreversible without reinstalling Windows).
 - **macOS Gatekeeper**: unsigned `.app`/`.dmg` are blocked on first open. Right-click → Open, or run
   `xattr -cr "/Applications/Cline Pass Switcher.app"`.

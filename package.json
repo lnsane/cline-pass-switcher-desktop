@@ -32,7 +32,7 @@
     "test:usage": "node scripts/test-usage.mjs",
     "test:usage-live": "node scripts/test-usage-live.mjs",
     "test:usage-e2e": "bash scripts/test-usage-e2e.sh",
-    "build:win": "bash scripts/build-win.sh",
+    "build:win": "scripts\\build-win.bat",
     "build:mac": "bash scripts/build-mac.sh"
   },
   "devDependencies": {

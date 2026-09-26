@@ -66,13 +66,25 @@ node src/main/engine/engine.js   # 只跑命令行版内核（等价于原 serve
 
 构建比打包快得多，也不受代码签名限制影响：
 
-```bash
-bash scripts/build-win.sh          # Windows：dist/win-unpacked/Cline Pass Switcher.exe
-bash scripts/build-mac.sh          # macOS：  dist/mac*/Cline Pass Switcher.app
+```bat
+scripts\build-win.bat              :: Windows：dist\win-unpacked\Cline Pass Switcher.exe
 ```
 
-两个脚本都支持 `--clean`（先删 `dist/`）、`--run`（构建完直接启动）；macOS 的还支持
-`--arm64` / `--x64`。产出的程序双击就能跑，和装完后的代码完全相同。
+```bash
+bash scripts/build-mac.sh          # macOS：dist/mac*/Cline Pass Switcher.app
+```
+
+Windows 上直接**双击** `scripts\build-win.bat` 也可以，或在 cmd 里执行。两个脚本都支持
+`--clean`（先删 `dist/`）、`--run`（构建完直接启动）；macOS 的还支持 `--arm64` / `--x64`。
+产出的程序双击就能跑，和装完后的代码完全相同。
+
+> **Windows 用户注意**：`build-win.sh` 需要 bash，Windows 上执行不了 —— 请用 `build-win.bat`。
+> 另外这两个脚本都只能构建**本平台**的产物（Windows 打不了 mac 包，反之亦然）；
+> 要出另一平台的安装包，推 tag 让 CI 打。
+
+> **正在跑的程序会被保护**：如果你正用着 `dist\win-unpacked\` 里的程序（它常常就是日常
+> 那份、可能正占用着代理端口），脚本会**直接停下并告诉你是哪个 PID**，不会删它的文件、
+> 也不会替你结束进程。先退出那个程序再构建，或者用 `--run` 让脚本构建完再起回来。
 
 ### 打包
 
