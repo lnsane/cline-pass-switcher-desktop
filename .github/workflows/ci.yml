@@ -57,6 +57,9 @@ jobs:
       - name: 界面文案双语覆盖
         run: npm run test:i18n
 
+      - name: 静态自查（未使用 import / 译文混中文 / 重复键）
+        run: npm run check:static
+
       - name: Claude Code 配置写入与上下文窗口档位
         run: |
           npm run test:claudecfg
