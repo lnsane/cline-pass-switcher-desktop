@@ -1,0 +1,109 @@
+{
+  "name": "cline-pass-switcher-desktop",
+  "productName": "Cline Pass Switcher",
+  "version": "2.2.0",
+  "description": "Cline Pass 上游控制台桌面版：枚举/校验/钉住订阅模型背后的上游渠道，账号池轮询，OpenAI 兼容代理",
+  "author": {
+    "name": "Cline Pass Switcher",
+    "email": "noreply@example.com"
+  },
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "src/main/main.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "electron .",
+    "engine": "node src/main/engine/engine.js",
+    "dist:win": "node scripts/make-icon.mjs && electron-builder --win --x64",
+    "dist:mac": "node scripts/make-icon.mjs && electron-builder --mac",
+    "dist:all": "electron-builder --win --mac --x64 --arm64",
+    "pack": "electron-builder --dir",
+    "icon": "node scripts/make-icon.mjs",
+    "test:unit": "node scripts/test-anthropic.mjs",
+    "test:live": "node scripts/test-messages-live.mjs",
+    "test:auth": "node scripts/test-auth.mjs",
+    "test:e2e": "bash scripts/test-claude-code-e2e.sh",
+    "probe": "node scripts/probe-upstream.mjs",
+    "test:claudecfg": "node scripts/test-claude-config.mjs",
+    "test:usage": "node scripts/test-usage.mjs",
+    "test:usage-live": "node scripts/test-usage-live.mjs",
+    "test:usage-e2e": "bash scripts/test-usage-e2e.sh"
+  },
+  "devDependencies": {
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3"
+  },
+  "dependencies": {},
+  "build": {
+    "appId": "com.clinepass.switcher",
+    "productName": "Cline Pass Switcher",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/seed",
+        "to": "seed"
+      },
+      {
+        "from": "build",
+        "to": "build"
+      }
+    ],
+    "asar": true,
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Cline Pass Switcher",
+      "artifactName": "ClinePassSwitcher-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "ClinePassSwitcher-Portable-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.png",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "ClinePassSwitcher-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "Cline Pass Switcher"
+    }
+  }
+}

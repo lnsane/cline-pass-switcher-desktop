@@ -1,0 +1,29 @@
+# ---------- 依赖 ----------
+node_modules/
+
+# ---------- 构建产物 ----------
+# 安装包与解包目录体积很大（数百 MB），绝不入库；由 CI 或本地 npm run dist:win 产出
+dist/
+dist-new/
+release/
+*.exe
+*.dmg
+*.blockmap
+
+# ---------- 日志与临时文件 ----------
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+*.bak-*
+.tmp-*
+
+# ---------- 编辑器 ----------
+.vscode/
+.idea/
+
+# 注意：build/ 要入库 —— 它是 electron-builder 的 buildResources（图标在这里），
+# 且 package.json 的 extraResources 会引用它。虽然 make-icon.mjs 能重新生成，
+# 但入库后 `pack` 等命令不依赖先跑图标脚本，CI 也更稳。

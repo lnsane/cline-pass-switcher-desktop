@@ -1,0 +1,36 @@
+# 行尾策略：让 Windows 与 macOS/Linux 检出后都能正常跑
+# 默认交给 git 自动处理（仓库内存 LF，检出时按平台转换）
+* text=auto
+
+# Shell 脚本必须是 LF —— CRLF 的 .sh 在 Linux/macOS CI 上会报
+# "bad interpreter: /bin/bash^M"，是新手最容易踩的坑
+*.sh text eol=lf
+
+# Node 源码与配置统一 LF，避免跨平台 diff 噪音
+*.js   text eol=lf
+*.mjs  text eol=lf
+*.cjs  text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+
+# Windows 专用脚��保持 CRLF（cmd/PowerShell 对 LF 的容忍度不如 Unix）
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制文件不要做任何转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.exe  binary
+*.dmg  binary
+*.zip  binary
+*.woff binary
+*.woff2 binary
