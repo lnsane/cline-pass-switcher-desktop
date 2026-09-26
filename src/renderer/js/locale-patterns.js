@@ -94,20 +94,8 @@
       re: /^(.+)（数据自\s*(\S+)\s*起）$/,
       to: '$1 (data since $2)',
     },
-    // "本次会写入 12 个环境变量：新增 1、覆盖 6、不变 5。"
-    {
-      re: /^本次会写入\s*(\d+)\s*个环境变量：新增\s*(\d+)、覆盖\s*(\d+)、不变\s*(\d+)。$/,
-      to: 'Will write $1 environment variables: $2 new, $3 overwritten, $4 unchanged.',
-    },
-    // "总共 3 个顶层键（permissions、hooks）与无关的环境变量一律原样保留，不会被覆盖。"
-    {
-      re: /^文件里另外\s*(\d+)\s*个顶层键/,
-      to: 'The other $1 top-level keys',
-    },
-    {
-      re: /^与无关的环境变量一律原样保留，不会被覆盖。$/,
-      to: ' and unrelated environment variables are left untouched.',
-    },
+    // 注意：Claude 配置弹窗的汇总句现在由 claudeconfig.js 用 T() 整句翻译，
+    // 不再走这里 —— 被 <b>/<span> 切开的片段正则匹配不到，留着是死代码。
     // "（已存在，12 个环境变量，有 2 份备份）"
     {
       re: /^（已存在，\s*([\d,]+)\s*个环境变量(.*)$/,

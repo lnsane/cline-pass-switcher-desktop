@@ -309,21 +309,47 @@ ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL and their _NAME
 CLAUDE_CODE_SUBAGENT_MODEL
 ```
 
+### Context window (200K / 1M)
+
+Claude Code does not recognise these model names, so it assumes a **200K** context window and
+auto-compacts early — even though the upstream channels are much larger (a probe of
+`cline-pass/glm-5.3-flash` reports 1,048,576). The dialog has a **Context window** selector:
+
+| Choice | What is written |
+|---|---|
+| 200K (default) | Nothing. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is **removed** from the file if a previous run added it |
+| 1M | `CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000` |
+
+The hint line under the selector tells you what the model actually measures, and warns if you pick a
+value **larger** than the probed size — the excess is rejected upstream. If there is no probe data yet
+it says so rather than assuming 1M is available.
+
+Switching back to 200K deletes the key instead of leaving the old value behind, so the dialog never
+claims a setting took effect that did not.
+
+**Why the env var and not a `[1m]` model suffix.** Claude Code supports both, but they differ in an
+important way: the `[1m]` suffix is read as a literal string, so it would be sent on the wire in the
+`model` field where an upstream may not accept it, and it hard-codes exactly 1M. The env var is
+honoured precisely for model IDs Claude Code does **not** recognize — which is exactly what
+`cline-pass/*` is — and it can state any real window size (some channels here report 1,310,720). This
+tool is a proxy front-end, so the value that reaches the upstream stays a clean model ID.
+
+Note this value tells Claude Code what to *assume* for auto-compaction; it does not make the upstream
+serve more than it actually can. That is why the dialog checks it against probe data.
+
 ### What it does to your config
 
 | Behavior | Detail |
 |---|---|
 | Touches only its own keys | Other top-level keys (permissions, hooks…) and unrelated env vars are preserved verbatim — no wholesale overwrite |
+| Deletes only its own keys | The only deletion ever performed is `CLAUDE_CODE_MAX_CONTEXT_TOKENS` when you pick the default; any other key name passed in for removal is ignored |
 | Always backs up first | To `settings.json.bak-<timestamp>`; the dialog has a **Restore from backup** button |
 | Refuses invalid JSON | If the existing file is not valid JSON it **gives up** rather than guessing at a fix; the original file is left byte-for-byte untouched |
 | Atomic write | Writes a temp file and renames, so a half-written config never appears |
 | Idempotent restore | Clicking Restore repeatedly always lands on the pre-write state (the safety backup taken before restoring is stored as `.pre-restore-`, so it is never mistaken for a restore target) |
 
-### Two things worth knowing
+### One more thing worth knowing
 
-- **Claude Code may report `<model>` isn't described by this version's model catalog** — that just means
-  it does not recognize the model name and assumes a 200k context window. It does not affect usage. To
-  silence it, set `CLAUDE_CODE_MAX_CONTEXT_TOKENS`.
 - **Restart Claude Code** (or start a new session) for the change to take effect.
 
 ---

@@ -353,6 +353,19 @@ table.tbl td.num { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .spacer { flex: 1; }
 .inline { display: flex; align-items: center; gap: 8px; }
 
+/* 分段单选（上下文窗口这类二选一）：选中项用强调色描边 + 浅底，不靠颜色单独承载状态 */
+.seg { display: inline-flex; border: 1px solid var(--hairline); border-radius: var(--radius-sm); overflow: hidden; }
+.seg-btn {
+  height: 30px; padding: 0 14px;
+  background: var(--surface-2); color: var(--ink-2);
+  border: 0; border-left: 1px solid var(--hairline);
+  font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.seg-btn:first-child { border-left: 0; }
+.seg-btn:hover:not(.is-active) { background: var(--surface-3); color: var(--ink); }
+.seg-btn.is-active { background: rgba(57,135,229,0.14); color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--series-1); }
+.seg-btn:focus-visible { outline: 2px solid var(--series-1); outline-offset: -2px; }
+
 /* 渠道多选（有序）：已选按顺序编号，可上移下移/移除 */
 .chain-slot {
   display: flex; align-items: center; gap: 6px;

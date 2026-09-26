@@ -491,11 +491,27 @@ function registerIpc() {
   // 已有文件不是合法 JSON 就拒绝写入（不做猜测性修复）。
   const maskSecret = (key, v) => (v == null ? null : /TOKEN|KEY|SECRET/i.test(key) ? String(v).slice(0, 6) + '…' : String(v));
 
-  ipcMain.handle('claude:info', () => {
+  // 各模型已知的最大上下文（来自上游渠道探测结果）。用于界面提示「这个模型到底有没有 1M」——
+  // 不知道就返回 0，界面按「未知」显示，绝不替用户猜一个大数。
+  async function modelContexts() {
+    const out = {};
+    try {
+      const eng = await ensureEngine();
+      for (const [id, m] of Object.entries((eng.META && eng.META.models) || {})) {
+        let max = 0;
+        for (const d of Object.values(m.upstreamDetail || {})) max = Math.max(max, Number(d.context) || 0);
+        if (max > 0) out[id] = max;
+      }
+    } catch { /* 引擎没起来就没有上下文数据，界面会显示「未知」 */ }
+    return out;
+  }
+
+  ipcMain.handle('claude:info', async () => {
     const p = claudeCfg.settingsPath();
     const cur = claudeCfg.readSettings(p);
     const backups = claudeCfg.listBackups(p);
     const env = cur.json && cur.json.env && typeof cur.json.env === 'object' ? cur.json.env : {};
+    const curCtx = Number(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS);
     return {
       path: p,
       exists: cur.exists,
@@ -505,6 +521,11 @@ function registerIpc() {
       currentBaseUrl: env.ANTHROPIC_BASE_URL || null,
       currentTokenMasked: maskSecret('TOKEN', env.ANTHROPIC_AUTH_TOKEN),
       currentModel: env.ANTHROPIC_MODEL || null,
+      // 已经写过的窗口，用来把单选默认到用户上次的选择
+      currentContextTokens: Number.isFinite(curCtx) && curCtx > 0 ? curCtx : null,
+      contextOptions: claudeCfg.CONTEXT_OPTIONS,
+      defaultContextTokens: claudeCfg.DEFAULT_CONTEXT_TOKENS,
+      modelContexts: await modelContexts(),
       envCount: Object.keys(env).length,
       backups: backups.length,
       lastBackup: backups.length ? path.basename(backups[backups.length - 1]) : null,
@@ -514,14 +535,16 @@ function registerIpc() {
   });
 
   ipcMain.handle('claude:preview', (_e, payload) => {
-    const env = claudeCfg.buildEnv(payload || {});
-    const pv = claudeCfg.preview(env);
-    // 一并回传「合并后的完整文件」，界面才能把将要写入的内容整体展示出来
-    return pv.ok ? { ...pv, env, result: claudeCfg.mergeSettings(claudeCfg.readSettings(pv.path).json, env).settings } : { ...pv, env };
+    // 预览与写入共用 buildPlan：两边各算一次的话，预览说「会删掉 X」而写入没删，界面就骗人了。
+    // result（写入后的完整文件）由 preview() 自己给，不在这里再 merge 一遍。
+    const plan = claudeCfg.buildPlan(payload || {});
+    const pv = claudeCfg.preview(plan.env, claudeCfg.settingsPath(), plan.remove);
+    return { ...pv, env: plan.env };
   });
 
   ipcMain.handle('claude:write', (_e, payload) => {
-    const r = claudeCfg.writeSettings(claudeCfg.buildEnv(payload || {}));
+    const plan = claudeCfg.buildPlan(payload || {});
+    const r = claudeCfg.writeSettings(plan.env, claudeCfg.settingsPath(), plan.remove);
     log(r.ok ? 'log' : 'error', '[Claude 配置] ' + (r.ok
       ? '已写入 ' + r.path + (r.backupPath ? '（已备份 ' + path.basename(r.backupPath) + '）' : '（原来没有该文件）')
       : '写入失败：' + r.error));

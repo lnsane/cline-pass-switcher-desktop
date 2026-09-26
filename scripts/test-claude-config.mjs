@@ -10,7 +10,9 @@ fs.mkdirSync(TMP, { recursive: true });
 process.env.CLAUDE_SETTINGS_PATH = path.join(TMP, 'settings.json');
 
 const mod = await import('../src/main/claude-config.js');
-const { buildEnv, mergeSettings, preview, writeSettings, restoreLatest, listBackups, readSettings, settingsPath } = mod;
+const { buildEnv, buildPlan, keysToRemove, mergeSettings, preview, writeSettings, restoreLatest, listBackups,
+        readSettings, settingsPath, managedKeys, normalizeContextTokens, CONTEXT_OPTIONS, DEFAULT_CONTEXT_TOKENS,
+        CONTEXT_KEY } = mod;
 
 let pass = 0;
 const fails = [];
@@ -31,6 +33,86 @@ eq(ENV.ANTHROPIC_MODEL, 'cline-pass/deepseek-v4.1-flash', 'MODEL');
 eq(ENV.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, ENV.ANTHROPIC_DEFAULT_OPUS_MODEL, 'MODEL 与 MODEL_NAME 写同一个值（不留旧值造成不一致）');
 ok(ENV.CLAUDE_CODE_SUBAGENT_MODEL === ENV.ANTHROPIC_MODEL, '子代理模型也指向同一个');
 eq(Object.keys(ENV).length, 12, '正好 12 个键', String(Object.keys(ENV).length));
+
+// ============ 1b. 上下文窗口（1M）============
+console.log('\n— 上下文窗口 —');
+const ENV_1M = buildEnv({ baseUrl: 'http://127.0.0.1:3199', token: 't', model: 'cline-pass/glm-5.3-flash', contextTokens: 1000000 });
+eq(ENV_1M[CONTEXT_KEY], '1000000', '1M 档写入 CLAUDE_CODE_MAX_CONTEXT_TOKENS');
+eq(Object.keys(ENV_1M).length, 13, '1M 档正好 13 个键', String(Object.keys(ENV_1M).length));
+ok(!(CONTEXT_KEY in ENV), '默认档**不写**这个键（不给用户配置留无效值）');
+
+// 默认档也要能显式指定，且不落键
+ok(!(CONTEXT_KEY in buildEnv({ baseUrl: 'a', token: 't', model: 'm', contextTokens: 200000 })), '显式传 200000 同样不落键');
+ok(!(CONTEXT_KEY in buildEnv({ baseUrl: 'a', token: 't', model: 'm', contextTokens: 150000 })), '小于默认值不落键');
+ok(!(CONTEXT_KEY in buildEnv({ baseUrl: 'a', token: 't', model: 'm', contextTokens: null })), 'null 不落键');
+ok(!(CONTEXT_KEY in buildEnv({ baseUrl: 'a', token: 't', model: 'm' })), '不传参也不落键');
+
+// 想写比 1M 更大的真实窗口也允许（上游有 1,310,720 的渠道）
+eq(buildEnv({ baseUrl: 'a', token: 't', model: 'm', contextTokens: 1310720 })[CONTEXT_KEY], '1310720', '任意大于默认的窗口都写');
+
+// 非法输入一律回落默认档，绝不写畸形值进用户配置
+for (const bad of ['abc', 0, -1, 999, NaN, Infinity, {}, []]) {
+  const v = buildEnv({ baseUrl: 'a', token: 't', model: 'm', contextTokens: bad })[CONTEXT_KEY];
+  ok(v === undefined, '非法值 ' + JSON.stringify(bad) + ' 回落默认档（不落键）', String(v));
+}
+eq(normalizeContextTokens('1000000'), 1000000, 'normalize 接受数字字符串');
+eq(normalizeContextTokens(1048576), 1048576, 'normalize 保留非整百万的真实窗口');
+eq(normalizeContextTokens(1000000.6), 1000001, 'normalize 取整');
+eq(normalizeContextTokens(undefined), DEFAULT_CONTEXT_TOKENS, 'normalize 无参 → 默认');
+ok(CONTEXT_OPTIONS.some((o) => Number(o.value) === 1000000), '选项里有 1M');
+ok(CONTEXT_OPTIONS.some((o) => Number(o.value) === DEFAULT_CONTEXT_TOKENS), '选项里有默认档');
+eq(CONTEXT_OPTIONS.length, 2, '正好两个选项');
+
+eq(managedKeys('m', 1000000)[CONTEXT_KEY], '1000000', 'managedKeys 直接传窗口也生效');
+eq(managedKeys('m')[CONTEXT_KEY], undefined, 'managedKeys 不传窗口则不落键');
+
+// keysToRemove：默认档要删，1M 档不删
+eq(keysToRemove({ contextTokens: 1000000 }), [], '1M 档没有要删的键');
+eq(keysToRemove({ contextTokens: DEFAULT_CONTEXT_TOKENS }), [CONTEXT_KEY], '默认档要删掉这个键');
+eq(keysToRemove({}), [CONTEXT_KEY], '不传（=默认档）也要删');
+eq(keysToRemove({ contextTokens: 'abc' }), [CONTEXT_KEY], '非法值 = 默认档 = 要删');
+
+// ============ 1c. 换档必须真的把键删掉（不是留在文件里）============
+console.log('\n— 换回默认档会删键 —');
+const ctxFile = path.join(TMP, 'ctx.json');
+fs.writeFileSync(ctxFile, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://x', KEEP_ME: 'y' } }, null, 2) + '\n');
+const plan1 = buildPlan({ baseUrl: 'http://127.0.0.1:3199', token: 't', model: 'm', contextTokens: 1000000 });
+writeSettings(plan1.env, ctxFile, plan1.remove);
+eq(JSON.parse(fs.readFileSync(ctxFile, 'utf8')).env[CONTEXT_KEY], '1000000', '切到 1M 后文件里有这个键');
+
+const pv = preview(plan1.env, ctxFile, plan1.remove);
+ok(pv.removed.length === 0, '1M 档预览不报告删除');
+
+// 关键回归：再切回默认档，键必须**消失**
+const plan2 = buildPlan({ baseUrl: 'http://127.0.0.1:3199', token: 't', model: 'm', contextTokens: DEFAULT_CONTEXT_TOKENS });
+const pv2 = preview(plan2.env, ctxFile, plan2.remove);
+ok(pv2.removed.includes(CONTEXT_KEY), '默认档预览报告会删掉这个键', JSON.stringify(pv2.removed));
+ok((pv2.removedDiffs || []).some((d) => d.key === CONTEXT_KEY && d.from === '1000000'), '预览给出删除前的原值');
+const w2 = writeSettings(plan2.env, ctxFile, plan2.remove);
+ok(w2.ok && w2.removed.includes(CONTEXT_KEY), '写入返回 removed 列表', JSON.stringify(w2.removed));
+const back = JSON.parse(fs.readFileSync(ctxFile, 'utf8')).env;
+ok(!(CONTEXT_KEY in back), '切回默认档后键真的没了（不会「选了 200K 实际还是 1M」）', JSON.stringify(back));
+eq(back.KEEP_ME, 'y', '删键不影响其他无关的 env 键');
+eq(back.ANTHROPIC_BASE_URL, 'http://127.0.0.1:3199', '我们的其他键照常写入');
+
+// 再来回切一轮，确认可逆
+writeSettings(buildPlan({ baseUrl: 'a', token: 't', model: 'm', contextTokens: 1000000 }).env, ctxFile, []);
+eq(JSON.parse(fs.readFileSync(ctxFile, 'utf8')).env[CONTEXT_KEY], '1000000', '再切回 1M 又能写入');
+writeSettings(plan2.env, ctxFile, plan2.remove);
+ok(!(CONTEXT_KEY in JSON.parse(fs.readFileSync(ctxFile, 'utf8')).env), '再切回默认档又删掉（反复切换稳定）');
+
+// 删除权限边界：只允许删我们自己的键，别的键一概拒绝
+console.log('\n— 删键的权限边界 —');
+const guard = mergeSettings({ env: { KEEP_ME: 'y', ANTHROPIC_MODEL: 'old' } },
+  { ANTHROPIC_MODEL: 'new' }, [CONTEXT_KEY, 'KEEP_ME', 'PATH', 'ANTHROPIC_AUTH_TOKEN']);
+eq(guard.settings.env.KEEP_ME, 'y', 'env 里与工具无关的键**不能**被删（KEEP_ME 还在）');
+ok(!guard.removed.includes('KEEP_ME'), 'removed 不含越权的键', JSON.stringify(guard.removed));
+ok(!guard.removed.includes('PATH'), 'removed 不含 PATH');
+ok(guard.removed.includes('ANTHROPIC_AUTH_TOKEN') === false, '原本不存在的键不报 removed');
+eq(guard.settings.env.ANTHROPIC_MODEL, 'new', '正常的合并照常发生');
+const guard2 = mergeSettings({ env: { ANTHROPIC_BASE_URL: 'x' } }, {}, ['ANTHROPIC_BASE_URL']);
+eq(guard2.settings.env.ANTHROPIC_BASE_URL, undefined, '我们自己的键可以被删');
+ok(guard2.removed.includes('ANTHROPIC_BASE_URL'), '自己的键删除会被记录');
 
 // ============ 2. mergeSettings 是纯函数，保护既有配置 ============
 console.log('\n— mergeSettings（纯函数）—');

@@ -48,6 +48,11 @@ jobs:
           npm run test:unit
           npm run test:usage
 
+      - name: Claude Code 配置写入与上下文窗口档位
+        run: |
+          npm run test:claudecfg
+          npm run test:context
+
       - name: 引擎能独立启动并响应
         run: |
           DATA_DIR=$(mktemp -d) node src/main/engine/engine.js &

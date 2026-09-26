@@ -28,6 +28,7 @@
     "test:e2e": "bash scripts/test-claude-code-e2e.sh",
     "probe": "node scripts/probe-upstream.mjs",
     "test:claudecfg": "node scripts/test-claude-config.mjs",
+    "test:context": "node scripts/test-context-e2e.mjs",
     "test:usage": "node scripts/test-usage.mjs",
     "test:usage-live": "node scripts/test-usage-live.mjs",
     "test:usage-e2e": "bash scripts/test-usage-e2e.sh",

@@ -12,10 +12,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// 上下文窗口。Claude Code 认不出模型名时会按 200k 假设，而这些上游渠道的窗口大得多
+// （实测 glm-5.3-flash 的渠道是 1,048,576），不告诉它就会在 20 万 token 处白白触发自动压缩。
+export const DEFAULT_CONTEXT_TOKENS = 200000;
+export const CONTEXT_KEY = 'CLAUDE_CODE_MAX_CONTEXT_TOKENS';
+export const CONTEXT_OPTIONS = [
+  { value: DEFAULT_CONTEXT_TOKENS, label: '200K（Claude Code 默认）' },
+  { value: 1000000, label: '1M' },
+];
+
+// 我们可能写入的全部键（含条件写入的）。删除只允许发生在这个集合里 ——
+// 「确保不存在的键」是用户给我们的权限，不是「可以删任意键」的权限，边界要焊死。
+const OWNED_KEYS = new Set([...Object.keys(managedKeys('x')), CONTEXT_KEY]);
+
 // 我们负责的 env 键。*_MODEL_NAME 与 *_MODEL 成对写：Claude Code 用 MODEL 认模型、
-// 用 NAME 显示；两边写同一个真模型名，既避免它按未知模型处理，也不留下旧值造成不一致。
-export function managedKeys(model) {
-  return {
+// 用 NAME 显示；两边写同一个真模型名，既避免它按未��模型处理，也不留下旧值造成不一致。
+export function managedKeys(model, contextTokens) {
+  const env = {
     ANTHROPIC_BASE_URL: undefined, // 由调用方填
     ANTHROPIC_AUTH_TOKEN: undefined,
     ANTHROPIC_MODEL: model,
@@ -29,6 +42,31 @@ export function managedKeys(model) {
     ANTHROPIC_DEFAULT_FABLE_MODEL_NAME: model,
     CLAUDE_CODE_SUBAGENT_MODEL: model,
   };
+  // 只在窗口**大于**默认值时才写：Claude Code 对小于 200k 的值不予采信（它照样按 200k 走），
+  // 写进去等于把「我们保证有这么大」写进用户配置而兑现不了。默认档一个键都不加。
+  const n = normalizeContextTokens(contextTokens);
+  if (n > DEFAULT_CONTEXT_TOKENS) env[CONTEXT_KEY] = String(n);
+  return env;
+}
+
+// 上下文窗口取值归一。非法输入一律回落默认档 —— 这里宁可少写一个键，也不能写进一个
+// 畸形值让 Claude Code 的上下文管理出问题。
+export function normalizeContextTokens(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1000) return DEFAULT_CONTEXT_TOKENS;
+  return Math.round(n);
+}
+
+// 换回默认档时必须把这个键**真的删掉**。合并是删不掉键的：上次写的 1M 会一直留在文件里，
+// 用户明明选了 200K，Claude Code 读到的还是 1M —— 设置界面显示「已选 200K」而实际没生效，
+// 这种「看着改了其实没改」是最难发现的一类问题。
+export function keysToRemove({ contextTokens } = {}) {
+  return normalizeContextTokens(contextTokens) > DEFAULT_CONTEXT_TOKENS ? [] : [CONTEXT_KEY];
+}
+
+// 一次算清「写什么、删什么」。界面预览与真正写入必须用同一份计算，否则预览会骗人。
+export function buildPlan(payload) {
+  return { env: buildEnv(payload), remove: keysToRemove(payload) };
 }
 
 // settings.json 的位置。CLAUDE_SETTINGS_PATH 用于测试与多环境，不设时就是 Claude Code 的默认位置。
@@ -38,29 +76,38 @@ export function settingsPath() {
 
 // 构造要写入的 env。baseUrl 用根地址（Anthropic 的惯例）：客户端自己拼 /v1/messages。
 // 本机代理同时收 /messages 与 /v1/messages，所以带不带 /v1 都能用。
-export function buildEnv({ baseUrl, token, model }) {
-  const env = managedKeys(model);
+export function buildEnv({ baseUrl, token, model, contextTokens }) {
+  const env = managedKeys(model, contextTokens);
   env.ANTHROPIC_BASE_URL = baseUrl;
   env.ANTHROPIC_AUTH_TOKEN = token;
   return env;
 }
 
-// 纯函数：把 env 合并进已有配置对象，返回新对象与逐键的变更分类
-export function mergeSettings(existing, env) {
+// 纯函数：把 env 合并进已有配置对象，返回新对象与逐键的变更分类。
+// remove 里的键会被**删掉**（这是我们负责的键里唯一允许删除的场景：换回默认档）。
+// 删除范围锁死在 OWNED_KEYS：调用方给别的键名一律忽略，不给越权删键的口子。
+export function mergeSettings(existing, env, remove = []) {
   const base = existing && typeof existing === 'object' && !Array.isArray(existing) ? existing : {};
   const out = { ...base };
   const prevEnv = base.env && typeof base.env === 'object' && !Array.isArray(base.env) ? base.env : {};
   out.env = { ...prevEnv, ...env };
 
+  const removed = [];
+  for (const k of remove) {
+    if (!OWNED_KEYS.has(k)) continue;
+    if (k in out.env) { delete out.env[k]; removed.push(k); }
+  }
+
   const added = [];
   const changed = [];
   const same = [];
   for (const [k, v] of Object.entries(env)) {
+    if (removed.includes(k)) continue;
     if (!(k in prevEnv)) added.push(k);
     else if (prevEnv[k] !== v) changed.push(k);
     else same.push(k);
   }
-  return { settings: out, added, changed, same, prevEnv };
+  return { settings: out, added, changed, same, removed, prevEnv };
 }
 
 // 读取既有配置；解析失败时明确回报，交给上层拒绝写入
@@ -81,10 +128,10 @@ export function readSettings(file = settingsPath()) {
 }
 
 // 预览（不落盘）：给界面显示"将要改哪些键"
-export function preview(env, file = settingsPath()) {
+export function preview(env, file = settingsPath(), remove = []) {
   const cur = readSettings(file);
   if (cur.error) return { ok: false, path: cur.path, exists: cur.exists, error: cur.error };
-  const m = mergeSettings(cur.json, env);
+  const m = mergeSettings(cur.json, env, remove);
   return {
     ok: true,
     path: cur.path,
@@ -92,9 +139,15 @@ export function preview(env, file = settingsPath()) {
     added: m.added,
     changed: m.changed,
     same: m.same,
+    removed: m.removed,
     // 会把已有的哪些值改掉（供界面展示 before → after）
     diffs: [...m.added, ...m.changed].map((k) => ({ key: k, from: m.prevEnv[k], to: env[k] })),
+    // 会被删掉的键（换回默认档时），也要让用户看见 before
+    removedDiffs: m.removed.map((k) => ({ key: k, from: m.prevEnv[k] })),
     keptTopLevel: Object.keys(cur.json || {}).filter((k) => k !== 'env'),
+    // 写入后的完整文件内容。放在这里而不是让调用方自己再 merge 一遍 ——
+    // 两处各算一次就有分叉的可能，界面预览的就不是真正会写进去的东西了。
+    result: m.settings,
   };
 }
 
@@ -170,11 +223,11 @@ export function listBackups(file = settingsPath()) {
 }
 
 // 写入：备份 → 临时文件 → 改名。任何一步失败都不留下半个文件。
-export function writeSettings(env, file = settingsPath()) {
+export function writeSettings(env, file = settingsPath(), remove = []) {
   const cur = readSettings(file);
   if (cur.error) return { ok: false, error: cur.error, path: cur.path };
 
-  const m = mergeSettings(cur.json, env);
+  const m = mergeSettings(cur.json, env, remove);
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
 
@@ -202,7 +255,7 @@ export function writeSettings(env, file = settingsPath()) {
   }
 
   pruneBackups(file);
-  return { ok: true, path: file, backupPath, added: m.added, changed: m.changed, same: m.same };
+  return { ok: true, path: file, backupPath, added: m.added, changed: m.changed, same: m.same, removed: m.removed };
 }
 
 // 撤销：从最近一次备份还原（还原前也备份当前内容，避免误操作不可挽回）

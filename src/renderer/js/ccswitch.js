@@ -218,8 +218,11 @@
     // cc-switch 要求 apiKey 非空；本机代理免鉴权时给一个明摆着的占位符，免得导入被它挡回来
     const apiKey = proxyKey || 'local-proxy-no-key';
     const publicBase = String(cfg.publicBaseUrl || '').trim().replace(/\/+$/, '');
-    const baseChoices = [{ label: '本机 · ' + localBase(), value: localBase() }];
-    if (publicBase) baseChoices.push({ label: '公网 · ' + publicBase, value: publicBase });
+    // 整句走 T()：选项文字是拼出来的一整串，词典里查的是整个文本节点，
+    // 用 '本机 · ' 这种前缀碎片是匹配不到的（切英文会留中文）。
+    const tr = (s, vars) => (window.T ? window.T(s, vars) : s);
+    const baseChoices = [{ label: tr('本机 · {url}', { url: localBase() }), value: localBase() }];
+    if (publicBase) baseChoices.push({ label: tr('公网 · {url}', { url: publicBase }), value: publicBase });
 
     const models = (window.APP.models || []).map((m) => m.id);
     if (!models.length) models.push(DEFAULT_MODEL);
