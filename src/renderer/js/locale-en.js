@@ -430,7 +430,11 @@
     'Haiku / Sonnet / Opus / Fable 与子代理全部映射到这同一个模型，Claude Code 里怎么切都不会漏回 Anthropic 官方。':
       'Haiku / Sonnet / Opus / Fable and subagents all map to this same model, so switching between them in ' +
       'Claude Code never leaks back to the official Anthropic endpoint.',
-    '删除': 'removed',
+    '删除': 'Delete',
+    // 被删键的徽标。刻意与「删除」（按钮动词）分开用两个键 ——
+    // 同一个「删除」既当动词又当状态时，词典里后写的那条会静默覆盖前面，
+    // 结果账号页的「删除」按钮显示成了 "removed"。
+    '将被删除': 'will be removed',
 
     // ---------- 上下文窗口（1M）----------
     // 这些是整句 + {n} 占位：DOM 走查抓不到 JS 里拼好的字符串，必须整句进词典。

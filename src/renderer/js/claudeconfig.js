@@ -237,7 +237,7 @@
         [...removed].map((k) =>
           '<div style="padding:7px 10px;border-bottom:1px solid var(--border);background:var(--critical-soft)">' +
           '<div style="font-size:12px"><span class="mono">' + U.esc(k) + '</span>' +
-          '<span class="badge b-critical" style="margin-left:6px">删除</span></div>' +
+          '<span class="badge b-critical" style="margin-left:6px">' + U.esc(tr('将被删除')) + '</span></div>' +
           (removedBefore[k] != null
             ? '<div class="field-hint" style="margin:2px 0 0">' + U.esc(tr('原值 {v}', { v: String(removedBefore[k]) })) + '</div>' : '') +
           '</div>').join('') +

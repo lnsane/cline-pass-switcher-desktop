@@ -193,9 +193,13 @@ export function deepseekCostCny(model, tok, ts) {
   const peak = isPeak(ts);
   const band = peak ? 'peak' : 'offpeak';
   const M = DEEPSEEK_CNY.unit;
-  const miss = (Number(t.input) || 0) + (Number(t.cacheCreation) || 0);
-  const hit = Number(t.cacheRead) || 0;
-  const out = Number(t.output) || 0;
+  // 负数当作 0：token 计数不该为负，但上游或上游的 bug 可能给出负值，
+  // 而 `Number(-100) || 0` 会**保留** -100，算出一个负的费用 ——
+  // 负花费会去抵消别的记录，把总额算少，比报错更难发现。
+  const n = (v) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; };
+  const miss = n(t.input) + n(t.cacheCreation);
+  const hit = n(t.cacheRead);
+  const out = n(t.output);
   const cost =
     (miss / M) * row.cacheMiss[band] +
     (hit / M) * row.cacheHit[band] +

@@ -13,7 +13,7 @@ import { Readable, Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { toChatRequest, toAnthropicResponse, createSseTranslator, estimateInputTokens } from './anthropic.js';
 import { createUsageStore, scanClaudeSessions, normalizeUpstreamUsage, dayKey, hourKey } from './usage.js';
-import { deepseekCostCny, DEEPSEEK_CNY, describeBand, isPeak } from './pricing-cny.js';
+import { deepseekCostCny, DEEPSEEK_CNY, describeBand } from './pricing-cny.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;

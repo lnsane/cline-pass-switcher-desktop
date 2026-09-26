@@ -23,7 +23,7 @@
 // input = prompt_tokens - cache_read（OpenAI 的 prompt_tokens 是含缓存的）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { deepseekCostCny, DEEPSEEK_CNY, isPeak, describeBand } from './pricing-cny.js';
+import { deepseekCostCny } from './pricing-cny.js';
 
 // ---------- 币种 ----------
 // 这里有两套彼此独立的钱，**绝不能混成一个总额**：
@@ -175,14 +175,18 @@ function lookupPricing(table, ...candidates) {
 
 // 用定价表估算一次请求的花费（美元）。token 为 Anthropic 口径。
 function estimateCost(table, model, tok) {
-  const p = lookupPricing(table, tok.pricingModel, tok.canonical, model);
+  const t = tok || {};
+  const p = lookupPricing(table, t.pricingModel, t.canonical, model);
   if (!p) return null;
   const M = 1e6;
+  // 与 pricing-cny 口径一致：负数与非有限值一律当 0。
+  // `Number(-5) || 0` 会保留 -5，算出负费用去抵消别的记录，把总额算少。
+  const n = (v) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : 0; };
   const cost =
-    (tok.input / M) * p.i +
-    (tok.output / M) * p.o +
-    (tok.cacheRead / M) * p.cr +
-    (tok.cacheCreation / M) * p.cc;
+    (n(t.input) / M) * p.i +
+    (n(t.output) / M) * p.o +
+    (n(t.cacheRead) / M) * p.cr +
+    (n(t.cacheCreation) / M) * p.cc;
   return { cost, pricingKey: p.key, estimated: true };
 }
 
@@ -476,7 +480,11 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
 
   // 按写入序号倒序读明细：从文件尾部往前扫，天然就是「最新的在前」。
   // 这样接口不必把整个文件读进内存，也不会把「文件位置」误当成「时间顺序」。
-  // 返回 truncated 表示扫到了上限还没凑够 —— 界面据此提示「可能还有更早的」。
+  //
+  // 返回 truncated 表示「扫到上限就停了，结果可能不完整」。
+  // 这一点必须如实上报：之前只在「没凑够 limit」时报 truncated，于是**带筛选且
+  // 匹配项正好都在更老的位置**时，会带着 truncated=false 返回「没有匹配」——
+  // 一个看起来正常的空结果，实际是没扫到。空结果和「扫不完」是两回事，不能混。
   function recentRecords({ limit = 200, model = '', source = '', from = 0, to = 0 } = {}) {
     const out = [];
     if (!fs.existsSync(DETAIL)) return { records: out, detailLines, truncated: false };
@@ -484,8 +492,12 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
     // limit 是「要几条」，但带筛选时可能翻很久，给个扫描上限防止极端情况卡住。
     const maxScan = Math.max(limit * 20, 5000);
     let scanned = 0;
-    for (let i = lines.length - 1; i >= 0 && out.length < limit && scanned < maxScan; i--, scanned++) {
+    let capped = false;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (out.length >= limit) break;
+      if (scanned >= maxScan) { capped = true; break; }
       const l = lines[i];
+      scanned += 1;
       if (!l) continue;
       let o = null;
       try { o = JSON.parse(l); } catch { continue; }
@@ -495,7 +507,7 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       if (to && Number(o.ts) > to) continue;
       out.push(o);
     }
-    return { records: out, detailLines, truncated: scanned >= maxScan && out.length < limit };
+    return { records: out, detailLines, truncated: capped, scanned };
   }
 
   return {

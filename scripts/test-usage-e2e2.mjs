@@ -304,6 +304,57 @@ const bj = (y, m, d, h, min = 0) => Date.UTC(y, m - 1, d, h, min) - 8 * 3600 * 1
   ok(typeof ds.n === 'number', '11.12 顺带补齐了缺失的写入序号');
 }
 
+// ---------- 12) 负数 token 不能产生负费用 ----------
+// 回归：`Number(-100) || 0` 会**保留** -100（-100 是 truthy），于是算出负花费，
+// 去抵消别的记录把总额算少 —— 比报错更难发现。两条计价路径都要挡。
+{
+  const off = bj(2026, 9, 28, 3);
+  const negCny = deepseekCostCny('deepseek-flash', { input: -100, output: -5, cacheRead: -1, cacheCreation: -1 }, off);
+  ok(negCny.cost >= 0, `12.1 人民币路径：负数 token 不产生负费用（得 ${negCny.cost}）`);
+  near(negCny.cost, 0, '12.2 负数一律当 0');
+  eq(negCny.tokens.cacheMiss, 0, '12.3 负数没有进 cacheMiss');
+  eq(negCny.tokens.output, 0, '12.4 负数没有进 output');
+
+  // 混合：一正一负，只算正的那部分
+  const mix = deepseekCostCny('deepseek-flash', { input: 1e6, output: -999 }, off);
+  near(mix.cost, 1, '12.5 正负混合时只计正数（未命中 1M × ¥1）');
+
+  // 非有限值
+  for (const bad of [NaN, Infinity, -Infinity]) {
+    const r = deepseekCostCny('deepseek-flash', { input: bad, output: bad }, off);
+    ok(Number.isFinite(r.cost) && r.cost >= 0, `12.6 ${String(bad)} 不产生 NaN/负值`);
+  }
+}
+
+// ---------- 13) truncated 要如实上报 ----------
+// 回归：只处理了 addedNodes 的那个坑修完后剩下这个 —— 扫描被上限截断时，
+// 旧实现只在「没凑够 limit」时报 truncated，于是带筛选且匹配项都在更老位置时，
+// 会带着 truncated=false 返回「没有匹配」，把「没扫到」伪装成「确实没有」。
+{
+  const dir6 = path.join(tmp, 'usage6');
+  const s6 = createUsageStore(dir6);
+  const base = bj(2026, 9, 28, 3);
+  const batch = [];
+  for (let i = 0; i < 6000; i++) batch.push({ id: 'd' + i, ts: base + i, source: 'proxy', model: 'k3', input: 1, output: 1 });
+  s6.addMany(batch);
+
+  const plain = s6.recentRecords({ limit: 5 });
+  eq(plain.records.length, 5, '13.1 无筛选时正常返回 5 条');
+  eq(plain.truncated, false, '13.2 无筛选时不误报 truncated');
+  eq(plain.records[0].id, 'd5999', '13.3 返回的是最新那几条');
+
+  // 只匹配最老的那 10 条 —— 必须扫到上限后如实报 truncated
+  const ancient = s6.recentRecords({ limit: 5, to: base + 10 });
+  eq(ancient.records.length, 0, '13.4 古老的匹配项超出了扫描上限（拿不到）');
+  eq(ancient.truncated, true, '13.5 此时必须报 truncated=true，而不是伪装成「没有匹配」');
+  ok(ancient.scanned >= 5000, '13.6 确实扫到了上限才停', `scanned=${ancient.scanned}`);
+
+  // 能扫到的情况不能误报
+  const near2 = s6.recentRecords({ limit: 5, from: base + 5990 });
+  eq(near2.records.length, 5, '13.7 靠后的匹配项能正常取到');
+  eq(near2.truncated, false, '13.8 能取到时不误报 truncated');
+}
+
 // ---------- 结果 ----------
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 清理失败无妨 */ }
 console.log(`\n用量统计端到端：通过 ${pass} 项，失败 ${fail} 项`);
