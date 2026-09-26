@@ -96,7 +96,7 @@ jobs:
       # --dir 只构建不打包：快，且不需要签名证书。
       # 正式安装包交给 release.yml。
       - name: 构建（不打包安装器）
-        run: npx electron-builder --dir
+        run: npx electron-builder --dir --publish never
         env:
           # 未配置签名证书时不让 electron-builder 去找，避免报错
           CSC_IDENTITY_AUTO_DISCOVERY: false

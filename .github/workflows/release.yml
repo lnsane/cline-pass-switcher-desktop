@@ -64,17 +64,22 @@ jobs:
       - name: 生成图标
         run: node scripts/make-icon.mjs
 
-      # mac 要同时出 x64 与 arm64 两个 dmg
+      # mac 要同时出 x64 与 arm64 两个 dmg。
+      #
+      # --publish never 是必须的：electron-builder 在 CI 里检测到 tag + GH_TOKEN 时
+      # 会**默认自己去发布 Release**（默认行为是 onTagOrDraft），与下面 publish job 里
+      # 的 softprops/action-gh-release 撞车，导致构建步骤直接失败。
+      # 发布统一交给 publish job 做，这里只负责产出文件。
       - name: 打包（Windows）
         if: matrix.platform == 'win'
-        run: npx electron-builder --win --x64
+        run: npx electron-builder --win --x64 --publish never
         env:
           # 没有签名证书时不报错（产物是未签名的，首次运行会被系统提示）
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
       - name: 打包（macOS）
         if: matrix.platform == 'mac'
-        run: npx electron-builder --mac --x64 --arm64
+        run: npx electron-builder --mac --x64 --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
 
