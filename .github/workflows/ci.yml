@@ -48,8 +48,11 @@ jobs:
           npm run test:unit
           npm run test:usage
           npm run test:cny
-          npm run test:usage-e2e
+          npm run test:usage-offline
           npm run test:usage-sink
+        # 注意：跑的是 test:usage-offline（纯离线，用临时目录造数据）。
+        # test:usage-e2e 会起真实 Claude Code 并**拷贝用户的真实账号密钥**，
+        # 只能在本地手动跑 —— 绝不能进 CI。两者键名不同就是为了不混。
 
       - name: 界面文案双语覆盖
         run: npm run test:i18n

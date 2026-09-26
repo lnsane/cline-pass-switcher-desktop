@@ -37,11 +37,12 @@ jobs:
           npm run test:unit
           npm run test:usage
           npm run test:cny
-          npm run test:usage-e2e
+          npm run test:usage-offline
           npm run test:usage-sink
           npm run test:claudecfg
           npm run test:context
           npm run test:i18n
+        # 不含 test:usage-e2e / test:live / test:e2e —— 那几个要真实账号密钥
 
   build:
     needs: verify

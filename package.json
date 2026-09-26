@@ -31,6 +31,7 @@
     "test:context": "node scripts/test-context-e2e.mjs",
     "test:cny": "node scripts/test-pricing-cny.mjs",
     "test:usage": "node scripts/test-usage.mjs",
+    "test:usage-offline": "node scripts/test-usage-e2e2.mjs",
     "test:usage-e2e": "bash scripts/test-usage-e2e.sh",
     "test:usage-sink": "node scripts/test-usage-sink.mjs",
     "test:i18n": "node scripts/check-i18n-usage.mjs",
