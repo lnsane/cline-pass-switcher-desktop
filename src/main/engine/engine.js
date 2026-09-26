@@ -12,7 +12,8 @@ import path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { toChatRequest, toAnthropicResponse, createSseTranslator, estimateInputTokens } from './anthropic.js';
-import { createUsageStore, scanClaudeSessions, normalizeUpstreamUsage, dayKey } from './usage.js';
+import { createUsageStore, scanClaudeSessions, normalizeUpstreamUsage, dayKey, hourKey } from './usage.js';
+import { deepseekCostCny, DEEPSEEK_CNY, describeBand, isPeak } from './pricing-cny.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || __dirname;
@@ -451,6 +452,11 @@ function record(modelId, info) {
   saveMeta();
 }
 
+// 每条用量记下来之后的通知回调。桌面端在启动时注册，用来把新记录推给界面
+// （「实时加载」靠它，而不是等下一次轮询）。命令行单独跑时没人注册，是空操作。
+let onUsageRecord = null;
+function setUsageSink(fn) { onUsageRecord = typeof fn === 'function' ? fn : null; }
+
 // 记一条用量明细。与 record() 分开在两个地方写：
 // - record() 进 metadata.json，是「渠道学习 + 最近 100 条」的老结构，保持不变
 // - recordUsage() 进 usage.jsonl，是逐条用量账本，只追加、不覆写
@@ -475,7 +481,14 @@ function recordUsage(modelId, {
       const est = USAGE.estimateCost(modelId, t);
       if (est) { cost = est.cost; costSource = 'estimated'; }
     }
-    USAGE.add({
+    // 人民币那一栏：按 DeepSeek 官方价目表独立算一遍（含峰谷时段），
+    // 与上面的美元**互不覆盖** —— 一个是上游账单，一个是官网价，回答的是两个问题。
+    // 认不出模型的（k3 / glm 等）保持 null，界面按「没有人民币价」显示，不冒充 0 元。
+    const cny = deepseekCostCny(modelId, {
+      input: t.input, output: t.output, cacheRead: t.cacheRead,
+      cacheCreation: t.cacheCreation, canonical, pricingModel: requestModel,
+    }, ts);
+    const entry = {
       id: requestId || `proxy:${ts}:${Math.random().toString(36).slice(2, 10)}`,
       ts, source,
       model: modelId,
@@ -486,10 +499,18 @@ function recordUsage(modelId, {
       input: t.input, output: t.output, cacheRead: t.cacheRead, cacheCreation: t.cacheCreation,
       total: t.total,
       cost, costSource,
+      costCny: cny ? cny.cost : null,
+      costCnyPeak: cny ? cny.peak : null,
+      cnyPricingKey: cny ? cny.pricingKey : null,
       ms, firstTokenMs, stream,
       error: error || null,
       sessionId,
-    });
+    };
+    if (USAGE.add(entry)) {
+      // 让界面能真正「实时」看到新记录，而不是等下一次轮询。
+      // 回调不存在时（命令行独立运行）就是空操作。
+      try { if (typeof onUsageRecord === 'function') onUsageRecord(entry); } catch { /* 推送失败不影响记录 */ }
+    }
   } catch (e) {
     // 统计失败绝不能影响代理本身 —— 记一笔日志继续跑（日志经 console 汇入主进程缓冲区）
     console.warn(`[用量] 记录失败（已忽略）：${e.message}`);
@@ -1137,27 +1158,46 @@ const server = http.createServer(async (req, res) => {
     // 汇总已经按 账号/渠道/模型 分好桶，前端拿到直接画图。
     if (req.method === 'GET' && p === '/api/usage') {
       const days = Math.max(1, Math.min(365, Number(url.searchParams.get('days')) || 30));
-      const daily = USAGE.daily;
-      const all = Object.keys(daily).sort();
-      const cutoff = dayKey(Date.now() - (days - 1) * 86400e3);
+      // granularity=hour 时改回小时桶（「当天」这一档要看 0-23 点的曲线，
+      // 一天只有一个点画不出趋势）。小时桶只保留近几天，超出范围时如实返回空。
+      const gran = url.searchParams.get('granularity') === 'hour' ? 'hour' : 'day';
+      const src = gran === 'hour' ? USAGE.hourly : USAGE.daily;
+      const all = Object.keys(src).sort();
+      // 起点：天粒度就是 (days-1) 天前那天；小时粒度必须是那天的 **00 点**。
+      // 用 hourKey(now) 当起点是错的 —— 那会只留下「当前小时及以后」，
+      // 于是「当天」看不到今天已经过去的那些小时（实测表现为「当天 0 次请求」）。
+      const startDay = dayKey(Date.now() - (days - 1) * 86400e3);
+      const cutoff = gran === 'hour' ? startDay + 'T00' : startDay;
       const picked = all.filter((d) => d >= cutoff);
-      const out = picked.map((d) => ({ date: d, rollups: Object.values(daily[d].rollups || {}) }));
+      const out = picked.map((d) => ({ date: d, rollups: Object.values(src[d].rollups || {}) }));
+      // available 描述的是**数据集本身的跨度**，一律按天取 ——
+      // 小时粒度下若拿小时键当日期，界面会显示成「数据自 2026-09-21T03 起」这种怪东西。
+      const allDays = Object.keys(USAGE.daily).sort();
       // 总计：跨所有选中日期再算一遍，前端不必自己合并
-      const totals = { requests: 0, success: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0, costReal: 0, costEstimated: 0, msSum: 0, msCount: 0 };
+      const totals = { requests: 0, success: 0, input: 0, output: 0, cacheRead: 0, cacheCreation: 0, cost: 0, costReal: 0, costEstimated: 0, costCny: 0, costCnyPeak: 0, msSum: 0, msCount: 0 };
       for (const day of out) {
         for (const r of day.rollups) {
           totals.requests += r.requests; totals.success += r.success;
           totals.input += r.input; totals.output += r.output;
           totals.cacheRead += r.cacheRead; totals.cacheCreation += r.cacheCreation;
           totals.cost += r.cost || 0; totals.costReal += r.costReal || 0; totals.costEstimated += r.costEstimated || 0;
+          totals.costCny += r.costCny || 0; totals.costCnyPeak += r.costCnyPeak || 0;
           totals.msSum += r.msSum; totals.msCount += r.msCount;
         }
       }
       return sendJSON(res, 200, {
-        ok: true, days, from: picked[0] || null, to: picked[picked.length - 1] || null,
-        available: { from: all[0] || null, to: all[all.length - 1] || null, total: all.length },
+        ok: true, days, granularity: gran,
+        from: picked[0] || null, to: picked[picked.length - 1] || null,
+        available: { from: allDays[0] || null, to: allDays[allDays.length - 1] || null, total: allDays.length },
         detailLines: USAGE.lines,
         sources: { dirs: claudeProjectsDirs().map((d) => ({ path: d, exists: fs.existsSync(d) })) },
+        // 当前时段：界面要能说明「现在按高峰还是空闲计价」，否则用户看到价格变了会以为是 bug
+        cny: {
+          currency: 'CNY', symbol: DEEPSEEK_CNY.symbol,
+          source: DEEPSEEK_CNY.source,
+          modelCount: Object.keys(DEEPSEEK_CNY.models).length,
+          now: describeBand(Date.now()),
+        },
         daily: out, totals,
       });
     }
@@ -1183,26 +1223,26 @@ const server = http.createServer(async (req, res) => {
       }
       return sendJSON(res, 200, { ok: true, ...total, sinceDays, dirs: results, detailLines: USAGE.lines });
     }
-    // 明细：只回最近 N 条（默认 200），支持按模型/账号/来源筛选。
+    // 明细：默认按**写入先后倒序**返回最近 N 条，支持按模型/来源/时间范围筛选。
+    //
+    // 为什么不再「从文件尾部读若干行」：会话扫描是按文件顺序追加的，而文件顺序
+    // 不等于时间顺序（实测 1701 条里 57 条乱序）。只取尾部会漏掉真正最新的记录、
+    // 又混进旧的。现在按写入序号 n 倒序取（见 usage.js 的 add），并把"时间倒序"
+    // 作为最终排序键，两边都对得上。
     if (req.method === 'GET' && p === '/api/usage/records') {
       const limit = Math.max(1, Math.min(2000, Number(url.searchParams.get('limit')) || 200));
       const fModel = url.searchParams.get('model') || '';
       const fSource = url.searchParams.get('source') || '';
-      const rows = [];
-      if (fs.existsSync(USAGE.paths.DETAIL)) {
-        // 从尾部读：先取最后 limit*3 行，筛选后再截断，避免全量载入
-        const raw = fs.readFileSync(USAGE.paths.DETAIL, 'utf8');
-        const lines = raw.split('\n').filter(Boolean);
-        for (let i = lines.length - 1; i >= 0 && rows.length < limit * 3; i--) {
-          let o = null;
-          try { o = JSON.parse(lines[i]); } catch { continue; }
-          if (fModel && !String(o.model || '').includes(fModel)) continue;
-          if (fSource && o.source !== fSource) continue;
-          rows.push(o);
-          if (rows.length >= limit) break;
-        }
-      }
-      return sendJSON(res, 200, { ok: true, records: rows, detailLines: USAGE.lines });
+      const fFrom = Number(url.searchParams.get('from')) || 0;
+      const fTo = Number(url.searchParams.get('to')) || 0;
+      const r = USAGE.recentRecords({ limit, model: fModel, source: fSource, from: fFrom, to: fTo });
+      // 明确按时间倒序返回：写入序号是「后写的在前」，正常情况下与时间同序，
+      // 但历史数据有乱序，这里再排一次保证界面拿到的就是严格的时间倒序。
+      const records = r.records.slice().sort((a, b) => (Number(b.ts) || 0) - (Number(a.ts) || 0));
+      return sendJSON(res, 200, {
+        ok: true, records, detailLines: r.detailLines, truncated: r.truncated,
+        order: 'ts_desc',
+      });
     }
     // 定价表：内置 + 用户自定义，供前端展示与「这个模型按什么价格算」
     if (req.method === 'GET' && p === '/api/usage/pricing') {
@@ -1230,7 +1270,33 @@ const server = http.createServer(async (req, res) => {
       const r = USAGE.compact({ keepDays: Number.isFinite(keepDays) && keepDays > 0 ? keepDays : 90 });
       return sendJSON(res, 200, { ok: true, ...r, detailLines: USAGE.lines });
     }
-    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels });
+    // 重算汇总与逐条的人民币金额。
+    //
+    // 为什么需要手动触发：人民币计价是后加的能力，老记录里没有 costCny，
+    // 而汇总只在写入时累加 —— 不重算的话历史在界面上永远是 ¥0，
+    // 新数据却有值，同一个页面一半有数一半是 0。
+    // 不放在启动时自动跑：记录多的时候要重写整个明细文件，启动会被拖慢；
+    // 由用户在用量页点一下更合适（也会明确告诉他发生了什么）。
+    if (req.method === 'POST' && p === '/api/usage/recompute') {
+      const r = USAGE.recompute();
+      // 汇总变了，缓存里的 daily/hourly 已由 recompute 内部刷新
+      return sendJSON(res, 200, { ok: true, ...r });
+    }
+    // 公开的定价资料：前端要展示「这个模型按什么价算」，以及当前处于高峰还是空闲。
+    // 只读、不含任何密钥。
+    if (req.method === 'GET' && p === '/api/usage/pricing-cny') {
+      return sendJSON(res, 200, {
+        ok: true,
+        cny: {
+          currency: DEEPSEEK_CNY.currency, symbol: DEEPSEEK_CNY.symbol, unit: DEEPSEEK_CNY.unit,
+          source: DEEPSEEK_CNY.source, models: DEEPSEEK_CNY.models,
+          peakWindows: DEEPSEEK_CNY.peakWindows,
+          holidayYears: Object.keys(DEEPSEEK_CNY.holidays).map(Number).sort(),
+        },
+        now: describeBand(Date.now()),
+      });
+    }
+    if (req.method === 'GET' && p === '/api/config') return sendJSON(res, 200, { port: config.port, perModel: config.perModel, knownModels: config.knownModels, usageCurrency: config.usageCurrency || 'auto' });
     if (req.method === 'POST' && p === '/api/config') {
       const body = JSON.parse(await readBody(req).then((b) => b.toString()));
       if (body.perModel) {
@@ -1249,6 +1315,13 @@ const server = http.createServer(async (req, res) => {
             sort: ['cost', 'ttft', 'tps'].includes(c.sort) ? c.sort : null,
           };
         }
+        saveConfig();
+      }
+      // 用量页的花费口径：'auto'（美元优先）/ 'cny'（DeepSeek 用官方人民币价）/ 'usd'。
+      // 只影响展示，不改任何记录 —— 记录里两种口径一直都存着。
+      if (body.usageCurrency !== undefined) {
+        const v = String(body.usageCurrency);
+        config.usageCurrency = ['auto', 'cny', 'usd'].includes(v) ? v : 'auto';
         saveConfig();
       }
       return sendJSON(res, 200, { ok: true });
@@ -1314,6 +1387,7 @@ export {
   learnUpstreamStatus,
   scanClaudeSessions,
   claudeProjectsDirs,
+  setUsageSink,
 };
 
 // 直接用 node 运行本文件时，保持原版「启动即监听」的行为（便于脱离 Electron 调试）

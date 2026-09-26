@@ -23,6 +23,17 @@
 // input = prompt_tokens - cache_read（OpenAI 的 prompt_tokens 是含缓存的）。
 import fs from 'node:fs';
 import path from 'node:path';
+import { deepseekCostCny, DEEPSEEK_CNY, isPeak, describeBand } from './pricing-cny.js';
+
+// ---------- 币种 ----------
+// 这里有两套彼此独立的钱，**绝不能混成一个总额**：
+//   1. 美元（cost）：经代理的请求带上游网关的真实账单（costSource='real'），
+//      或非 DeepSeek 模型按 models.dev 定价表的估算（'estimated'）。
+//   2. 人民币（costCny）：DeepSeek 官方价目表算出来的，与渠道无关、只按 token 和时段算。
+//      同一笔 DeepSeek 请求会同时有两个数：上游账单是多少美元，按官网价是多少人民币。
+//      这不是重复计算，是两个问题的答案，各自小计、各自标注币种。
+export const USD = 'USD';
+export const CNY = 'CNY';
 
 // ---------- 定价 ----------
 // 单位：美元 / 百万 token。来源为 models.dev（与 cc-switch 同源），只内置常用项；
@@ -206,17 +217,28 @@ export function dayKey(ts) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+// 小时桶键，形如 2026-09-26T14。用**本地**时区，和 dayKey 保持一致 ——
+// 「今天」这一档要按小时画图，若小时用 UTC 而天用本地，跨时区时会出现
+// 「今天的某个小时被算到昨天」这种对不上的情况。
+export function hourKey(ts) {
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}`;
+}
+
 // ---------- 存储 ----------
-// 一个 store 管三样东西：
-//   usage.jsonl      逐条明细（append-only）
-//   usage_daily.json 按天×账号×渠道×模型 的汇总（小，读得快）
-//   usage_sync.json  会话扫描的增量游标
+// 一个 store 管四样东西：
+//   usage.jsonl       逐条明细（append-only）
+//   usage_daily.json  按天×账号×渠道×模型 的汇总（小，读得快）
+//   usage_hourly.json 按小时×账号×渠道×模型 的汇总（供「当天」这一档画小时曲线）
+//   usage_sync.json   会话扫描的增量游标
 export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } = {}) {
   // 目录可能还不存在（首次运行、或调用方给了新的子目录）—— 先建好，
   // 否则第一次 appendFileSync 直接 ENOENT 崩掉。
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* 已存在或不可写，交给后续写入报错 */ }
   const DETAIL = path.join(dir, 'usage.jsonl');
   const DAILY = path.join(dir, 'usage_daily.json');
+  const HOURLY = path.join(dir, 'usage_hourly.json');
   const SYNC = path.join(dir, 'usage_sync.json');
   const PRICING = path.join(dir, 'pricing.json');
 
@@ -227,14 +249,21 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
   const table = { ...BUILTIN_PRICING, ...pricing, ...customPricing };
 
   let daily = null;       // { "YYYY-MM-DD": { rollups: { key: {...} } } }
+  let hourly = null;      // { "YYYY-MM-DDTHH": { rollups: { key: {...} } } }
   let syncState = null;   // { files: { "path": { offset, mtime, size } } }
   let detailLines = 0;    // 明细行数，用于触发压缩
+  let seq = 0;            // 单调递增的写入序号，见 add() 里的说明
   const seenIds = new Set();  // 已记录的请求 id（去重用），启动时从明细回填
 
   function loadDaily() {
     if (daily) return daily;
     try { daily = JSON.parse(fs.readFileSync(DAILY, 'utf8')); } catch { daily = {}; }
     return daily;
+  }
+  function loadHourly() {
+    if (hourly) return hourly;
+    try { hourly = JSON.parse(fs.readFileSync(HOURLY, 'utf8')); } catch { hourly = {}; }
+    return hourly;
   }
   function loadSync() {
     if (syncState) return syncState;
@@ -247,10 +276,11 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
   // 汇总键：同一天里按 账号 / 渠道 / 请求模型 / 真实模型 分桶
   const rollupKey = (e) => [e.account || '-', e.provider || '-', e.model || '-', e.canonical || '-'].join(' ');
 
-  function bumpDaily(entry) {
-    const d = loadDaily();
-    const day = dayKey(entry.ts);
-    const bucket = (d[day] ||= { rollups: {} });
+  // 往一个桶里累加一条记录。daily 与 hourly 共用这一段 ——
+  // 两处各写一遍累加逻辑的话，迟早会有某个字段只加进了其中一边，
+  // 而那种错在界面上表现为「两个图对不上」，很难定位。
+  function bumpInto(bucketMap, keyName, entry) {
+    const bucket = (bucketMap[keyName] ||= { rollups: {} });
     const k = rollupKey(entry);
     const r = (bucket.rollups[k] ||= {
       account: entry.account || null, provider: entry.provider || null,
@@ -259,6 +289,7 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       requests: 0, success: 0,
       input: 0, output: 0, cacheRead: 0, cacheCreation: 0,
       cost: 0, costReal: 0, costEstimated: 0,
+      costCny: 0, costCnyPeak: 0,
       msSum: 0, msCount: 0, firstTokenSum: 0, firstTokenCount: 0,
       bySource: {},
     });
@@ -270,21 +301,44 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       if (entry.costSource === 'real') r.costReal += entry.cost;
       else r.costEstimated += entry.cost;
     }
+    // 人民币只有 DeepSeek 系列算得出来（认不出的模型是 null，不进这里）。
+    // 单独累计、单独小计 —— 和上面的美元不是一回事，不能相加。
+    if (entry.costCny != null) {
+      r.costCny += entry.costCny;
+      if (entry.costCnyPeak) r.costCnyPeak += entry.costCny;
+    }
     if (Number(entry.ms) > 0) { r.msSum += Number(entry.ms); r.msCount += 1; }
     if (Number(entry.firstTokenMs) > 0) { r.firstTokenSum += Number(entry.firstTokenMs); r.firstTokenCount += 1; }
     r.bySource[entry.source] = (r.bySource[entry.source] || 0) + 1;
-    return d;
+    return bucketMap;
+  }
+
+  function bumpDaily(entry) { return bumpInto(loadDaily(), dayKey(entry.ts), entry); }
+
+  function bumpHourly(entry) {
+    const h = loadHourly();
+    const out = bumpInto(h, hourKey(entry.ts), entry);
+    // 小时桶只服务于「当天按小时」这一档，攒多了没意义还会让文件变大。
+    // 保留最近 4 天（当天最坏也就跨零点那几个小时）。
+    const keys = Object.keys(h).sort();
+    if (keys.length > 4 * 24) for (const k of keys.slice(0, keys.length - 4 * 24)) delete h[k];
+    return out;
   }
 
   // 记一条。返回 false 表示这条被去重跳过了。
+  //
+  // 每条都带一个自增的 `n`（写入序号）。为什么需要它：会话扫描是**按文件顺序**追加的，
+  // 而文件顺序不等于时间顺序（实测 1701 条里有 57 条乱序）。明细接口若只把文件尾部
+  // 当成「最近 N 条」，就会漏掉真正最新的记录、又混进旧的 —— 这正是「倒序」要修的问题。
+  // 有了 n 就能按「写入先后」倒序取，和从尾部读的做法天然一致。
   function add(entry) {
     const id = entry.id ? String(entry.id) : null;
     if (id && seenIds.has(id)) return false;
     if (id) seenIds.add(id);
-    const line = JSON.stringify(entry);
-    fs.appendFileSync(DETAIL, line + '\n');
+    fs.appendFileSync(DETAIL, JSON.stringify({ ...entry, n: ++seq }) + '\n');
     detailLines += 1;
     fs.writeFileSync(DAILY, JSON.stringify(bumpDaily(entry)));
+    fs.writeFileSync(HOURLY, JSON.stringify(bumpHourly(entry)));
     return true;
   }
 
@@ -298,29 +352,36 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
       fresh.push(e);
     }
     if (!fresh.length) return 0;
-    fs.appendFileSync(DETAIL, fresh.map((e) => JSON.stringify(e)).join('\n') + '\n');
+    fs.appendFileSync(DETAIL, fresh.map((e) => JSON.stringify({ ...e, n: ++seq })).join('\n') + '\n');
     detailLines += fresh.length;
-    let d = null;
-    for (const e of fresh) d = bumpDaily(e);
+    let d = null; let h = null;
+    for (const e of fresh) { d = bumpDaily(e); h = bumpHourly(e); }
     if (d) fs.writeFileSync(DAILY, JSON.stringify(d));
+    if (h) fs.writeFileSync(HOURLY, JSON.stringify(h));
     return fresh.length;
   }
 
-  // 启动时回填：明细里的 id 集合 + 行数。只读尾部若干行，
-  // 避免历史很长时启动变慢（去重只需要认出「近期」重复，会话扫描本身也是增量）。
+  // 启动时回填：明细里的 id 集合 + 行数 + 最大写入序号。只读尾部若干行做去重，
+  // 但序号要从**全部**行里取最大值 —— 尾部窗口之外的老记录也可能带着更大的 n
+  // （乱序追加的历史），拿尾部的最大值会让新记录与老记录重号。
   function prime({ tailLines = 20000 } = {}) {
     if (!fs.existsSync(DETAIL)) return { lines: 0 };
     const raw = fs.readFileSync(DETAIL, 'utf8');
     const lines = raw.split('\n').filter(Boolean);
     detailLines = lines.length;
-    const tail = lines.slice(-tailLines);
-    for (const l of tail) {
+    for (const l of lines) {
+      const i = l.lastIndexOf('"n":');
+      if (i < 0) continue;
+      const v = Number(l.slice(i + 4).split(/[,}]/)[0]);
+      if (Number.isFinite(v) && v > seq) seq = v;
+    }
+    for (const l of lines.slice(-tailLines)) {
       try {
         const o = JSON.parse(l);
         if (o && o.id) seenIds.add(String(o.id));
       } catch { /* 忽略坏行 */ }
     }
-    return { lines: lines.length, ids: seenIds.size };
+    return { lines: lines.length, ids: seenIds.size, seq };
   }
 
   // 明细文件过大时按天裁剪：保留最近 keepDays 天，重写文件。
@@ -345,14 +406,107 @@ export function createUsageStore(dir, { pricing = {}, maxDetailLines = 200000 } 
     return { removed, kept: kept.length };
   }
 
+  // 重算所有汇总（按天 + 按小时）与**逐条明细的人民币字段**。
+  //
+  // 为什么需要它：人民币计价是后加的能力，之前的记录里根本没有 costCny 字段，
+  // 而汇总文件（usage_daily.json / usage_hourly.json）只在**写入时**累加。
+  // 于是不重算的话，历史数据在界面上永远是 ¥0，新数据却有值 ——
+  // 同一个界面里一半有数一半是 0，比「都没数」更容易让人判断错。
+  //
+  // 同时把每条明细的 costCny / costCnyPeak 补写回去：这样单条记录的花费
+  // 与汇总口径一致，不会出现「明细说 ¥0.01、当天合计说 ¥0」的矛盾。
+  //
+  // 幂等：重算是「从 token 重新推一遍」，跑几次结果都一样；金额不叠加、只覆盖。
+  // 明细行数很多时（十万级）会慢，所以调用方按需触发，不要每次启动都跑。
+  function recompute({ withDetail = true } = {}) {
+    if (!fs.existsSync(DETAIL)) return { records: 0, days: 0, hours: 0, cny: 0 };
+    const raw = fs.readFileSync(DETAIL, 'utf8');
+    const lines = raw.split('\n');
+    const nextDaily = {};
+    const nextHourly = {};
+    const rewritten = [];
+    let count = 0;
+    let cnyTotal = 0;
+    let changed = 0;
+
+    for (const l of lines) {
+      if (!l) continue;
+      let o = null;
+      try { o = JSON.parse(l); } catch { rewritten.push(l); continue; }
+      count += 1;
+      // 重算这条的人民币（认不出的模型得 null，保持 null）
+      const cny = deepseekCostCny(o.model, {
+        input: o.input, output: o.output, cacheRead: o.cacheRead,
+        cacheCreation: o.cacheCreation, canonical: o.canonical, pricingModel: o.requestModel,
+      }, o.ts);
+      const val = cny ? cny.cost : null;
+      const peak = cny ? cny.peak : null;
+      if (o.costCny !== val || o.costCnyPeak !== peak) {
+        o.costCny = val;
+        o.costCnyPeak = peak;
+        changed += 1;
+      }
+      // 序号缺失的老记录补上（倒序读取依赖 n）
+      if (typeof o.n !== 'number') { o.n = seq + 1; seq += 1; changed += 1; }
+      if (o.n > seq) seq = o.n;
+      if (val != null) cnyTotal += val;
+
+      // 累加进新的汇总
+      bumpInto(nextDaily, dayKey(o.ts), o);
+      bumpInto(nextHourly, hourKey(o.ts), o);
+      rewritten.push(withDetail ? JSON.stringify(o) : l);
+    }
+
+    // 小时桶同样保留最近 4 天
+    const hk = Object.keys(nextHourly).sort();
+    if (hk.length > 4 * 24) for (const k of hk.slice(0, hk.length - 4 * 24)) delete nextHourly[k];
+
+    daily = nextDaily;
+    hourly = nextHourly;
+    fs.writeFileSync(DAILY, JSON.stringify(daily));
+    fs.writeFileSync(HOURLY, JSON.stringify(hourly));
+    if (withDetail && changed) {
+      const tmp = DETAIL + '.tmp';
+      fs.writeFileSync(tmp, rewritten.join('\n') + '\n');
+      fs.renameSync(tmp, DETAIL);
+    }
+    detailLines = count;
+    return { records: count, changed, days: Object.keys(daily).length, hours: Object.keys(hourly).length, cny: cnyTotal };
+  }
+
+  // 按写入序号倒序读明细：从文件尾部往前扫，天然就是「最新的在前」。
+  // 这样接口不必把整个文件读进内存，也不会把「文件位置」误当成「时间顺序」。
+  // 返回 truncated 表示扫到了上限还没凑够 —— 界面据此提示「可能还有更早的」。
+  function recentRecords({ limit = 200, model = '', source = '', from = 0, to = 0 } = {}) {
+    const out = [];
+    if (!fs.existsSync(DETAIL)) return { records: out, detailLines, truncated: false };
+    const lines = fs.readFileSync(DETAIL, 'utf8').split('\n');
+    // limit 是「要几条」，但带筛选时可能翻很久，给个扫描上限防止极端情况卡住。
+    const maxScan = Math.max(limit * 20, 5000);
+    let scanned = 0;
+    for (let i = lines.length - 1; i >= 0 && out.length < limit && scanned < maxScan; i--, scanned++) {
+      const l = lines[i];
+      if (!l) continue;
+      let o = null;
+      try { o = JSON.parse(l); } catch { continue; }
+      if (model && !String(o.model || '').includes(model)) continue;
+      if (source && o.source !== source) continue;
+      if (from && Number(o.ts) < from) continue;
+      if (to && Number(o.ts) > to) continue;
+      out.push(o);
+    }
+    return { records: out, detailLines, truncated: scanned >= maxScan && out.length < limit };
+  }
+
   return {
-    add, addMany, prime, compact, table,
+    add, addMany, prime, compact, recompute, recentRecords, table,
     get daily() { return loadDaily(); },
+    get hourly() { return loadHourly(); },
     get sync() { return loadSync(); },
     saveSync,
     get lines() { return detailLines; },
     has: (id) => seenIds.has(String(id)),
-    paths: { DETAIL, DAILY, SYNC, PRICING },
+    paths: { DETAIL, DAILY, HOURLY, SYNC, PRICING },
     estimateCost: (model, tok) => estimateCost(table, model, tok),
     lookupPricing: (...c) => lookupPricing(table, ...c),
   };
@@ -435,6 +589,9 @@ export function scanClaudeSessions({ projectsDir, sync, store, sinceDays = 30 } 
         // 用估算填上，并标记 costSource: 'estimated'，让前端能与
         // 「上游真实账单」区分开。不填的话用户会看到 $0 以为免费。
         const est = store.estimateCost(model, { input, output, cacheRead, cacheCreation });
+        // 人民币：DeepSeek 系列走官方价目表（含峰谷时段）。k3/glm 之类认不出，
+        // 保持 null 而不是 0 —— 界面上「没有人民币价」和「花了 0 元」必须区分开。
+        const cny = deepseekCostCny(model, { input, output, cacheRead, cacheCreation, canonical: model }, ts);
         batch.push({
           id, ts, source: 'session',
           model,
@@ -446,6 +603,9 @@ export function scanClaudeSessions({ projectsDir, sync, store, sinceDays = 30 } 
           total: input + output + cacheRead + cacheCreation,
           cost: est ? est.cost : null,
           costSource: est ? 'estimated' : null,
+          costCny: cny ? cny.cost : null,
+          costCnyPeak: cny ? cny.peak : null,
+          cnyPricingKey: cny ? cny.pricingKey : null,
           sessionId: o.sessionId || null,
           cwd: o.cwd || null,
           gitBranch: o.gitBranch || null,

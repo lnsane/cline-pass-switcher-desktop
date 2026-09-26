@@ -152,16 +152,28 @@
       translating = true;
       try {
         for (const r of records) {
-          for (const node of r.addedNodes) {
-            if (node.nodeType === 1) applyToDom(node);
-            else if (node.nodeType === 3 && node.parentElement) applyToDom(node.parentElement);
+          // 只处理 addedNodes 是不够的：视图重绘走的是 `el.innerHTML = ...`，
+          // 那是**已有元素内部**的节点被替换，MutationObserver 记的是 characterData
+          // 或「父节点没变、子节点换了」—— 两者都不在 addedNodes 里，
+          // 于是整页重绘后新文案全是中文（切英文时表现为「这个页面没翻译」）。
+          // 所以这里改按「受影响的元素」遍历：谁的子树动了就翻谁。
+          if (r.type === 'childList') {
+            for (const node of r.addedNodes) {
+              if (node.nodeType === 1) applyToDom(node);
+              else if (node.nodeType === 3 && node.parentElement) applyToDom(node.parentElement);
+            }
+            // 重绘：目标元素自身的内容被整体换掉了
+            if (r.target && r.target.nodeType === 1 && r.addedNodes.length) applyToDom(r.target);
+            else if (r.target && r.target.nodeType === 3 && r.target.parentElement) applyToDom(r.target.parentElement);
+          } else if (r.type === 'characterData' && r.target && r.target.parentElement) {
+            applyToDom(r.target.parentElement);
           }
         }
       } finally {
         translating = false;
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
   function stopObserver() {
     if (observer) { observer.disconnect(); observer = null; }

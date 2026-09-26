@@ -30,7 +30,8 @@ This app makes that visible and controllable:
 | Account pool | Round-robin or manual selection across multiple accounts, with per-account connectivity tests |
 | Official quota | Reads Cline's own usage API for the 5-hour / weekly / monthly windows |
 | Request history | The upstream each proxied request actually hit, the backing model, duration, attempt path, and which account was used |
-| Usage statistics | Daily trends and per-request detail for tokens, cache hits, and spend. Proxied requests use the **real cost reported by the upstream**; a scan of Claude Code session files fills in requests that bypassed the proxy (deduplicated) — so **stats work even with the proxy off** |
+| Usage statistics | Daily trends (today by hour / 7 / 31 / 60 / 90 days) and a newest-first request list for tokens, cache hits, and spend — updating **live** as requests flow through. Proxied requests use the **real cost reported by the upstream**; a scan of Claude Code session files fills in requests that bypassed the proxy (deduplicated) — so **stats work even with the proxy off** |
+| DeepSeek CNY pricing | DeepSeek models are also priced from **DeepSeek's official CNY list price**, including peak/off-peak (peak is exactly double). Shown **alongside** — never merged with — the USD upstream invoice, each with its own subtotal |
 | Desktop integration | Tray resident, close-to-tray, launch at login, port/key editable in the window, one-click config export/import |
 | CC Switch integration | A single `ccswitch://` deep link turns this proxy into a CC Switch provider, including its usage-query script |
 | Dual protocol | The proxy serves both `/v1/chat/completions` (OpenAI) and `/v1/messages` (Anthropic), so Claude Code can connect directly without a third-party protocol converter |
@@ -299,6 +300,49 @@ appends never rewrite, so a crash loses at most the last line. Daily rollups are
 separately so the trend chart can read them quickly.
 
 **Clean up old records** deletes per-request detail older than 90 days (rollups and totals are unaffected).
+
+### Ranges and live updates
+
+The trend chart has five ranges: **today** (bucketed by hour, 00–23), **7 / 31 / 60 / 90 days**. Today is
+hourly because a single point can't show a trend. The request list is **newest first**.
+
+New requests update the view **live**: the engine pushes each recorded request to the UI through an
+internal callback over the existing main-process channel (no extra port), with a 30-second fallback poll
+in case an event is dropped. Leaving the view stops both.
+
+### DeepSeek CNY pricing
+
+DeepSeek models are *also* priced from the **official CNY list price** (CNY per million tokens), on top of
+the USD upstream invoice:
+
+| Model | Cached input | Uncached input | Output |
+|---|---|---|---|
+| `deepseek-flash` (DeepSeek-V4.1-Flash) | 0.02 / 0.04 | 1 / 2 | 4 / 8 |
+| `deepseek-v4-pro` (DeepSeek-V4-Pro-0813) | 0.15 / 0.30 | 4.5 / 9.0 | 13.5 / 27.0 |
+
+Each cell is **off-peak / peak**. Peak is Mon–Fri 09:00–12:00 and 14:00–18:00 **Beijing time, excluding
+Chinese public holidays**; everything else (weekends and holidays all day) is off-peak, and the off-peak
+rate is **exactly half** the peak rate. Holidays follow the State Council's 2026 schedule
+(`国办发明电〔2025〕7号`, 33 days including a 9-day Spring Festival).
+
+Four things worth being explicit about:
+
+- **The two currencies are never merged.** CNY comes from the official list price and is independent of
+  which upstream served the request; USD is the gateway's real invoice. Adding them, or converting at
+  some exchange rate, would produce a number carrying a hidden FX assumption — so they are shown side by
+  side, each with its own subtotal.
+- **Nothing is force-priced.** Only DeepSeek models have an official CNY price. `k3` / `glm` / `qwen` and
+  the rest stay "no CNY price" rather than being given someone else's rate and passing for ¥0.
+- **Cache writes are billed as uncached input** — the official table has no cache-write tier. This rounds
+  *up*, so it can't understate the bill.
+- **Make-up workdays count as weekends (off-peak).** The official wording names Mon–Fri as peak and
+  weekends as off-peak all day, and the make-up days all fall on Saturdays/Sundays. That is a literal
+  reading, recorded in the source comments so it can be audited.
+
+Peak/off-peak is decided in **Beijing time regardless of the machine's timezone** (cross-checked in tests
+under four timezones). Records written *before* this feature have no CNY field and show ¥0 — click
+**Recalculate CNY** in the detail panel to price the whole history from the official table (idempotent;
+amounts are re-derived, never accumulated).
 
 > **Token accounting** uses the Anthropic convention throughout — `input` **excludes** cached tokens,
 > which are reported separately. The upstream's OpenAI-style `prompt_tokens` includes them, so the proxy

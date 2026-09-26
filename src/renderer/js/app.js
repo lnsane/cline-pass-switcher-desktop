@@ -61,6 +61,12 @@
   async function nav(name, { force } = {}) {
     if (!window.VIEWS[name]) return;
     if (name === APP.view && !force) return;
+    // 离开旧视图时给它一次收尾的机会。用量页靠这个停掉实时推送与轮询 ——
+    // 不停的话切走之后它还在后台每 30 秒拉一次数据（白耗电、也可能打断正在进行的操作）。
+    const prev = window.VIEWS[APP.view];
+    if (prev && typeof prev.destroy === 'function') {
+      try { prev.destroy(); } catch (e) { console.warn('[app] 视图收尾失败：', e && e.message); }
+    }
     APP.view = name;
     for (const el of document.querySelectorAll('.nav-item')) {
       el.classList.toggle('is-active', el.getAttribute('data-view') === name);
@@ -81,6 +87,12 @@
       await view.load(root);
     } catch (e) {
       root.innerHTML = '<div class="banner b-critical"><span class="b-ico">⚠</span><div>渲染失败：' + U.esc(e.message) + '</div></div>';
+    }
+    // 副标题在 load 之后再刷一次。视图的 sub() 往往依赖 load 拿到的数据
+    // （比如用量页要显示「近 7 天 67 次请求」），而上面那次是在数据到位前算的，
+    // 结果会一直停在兜底文案上 —— 看起来像数据没加载出来。
+    if (typeof view.sub === 'function') {
+      document.getElementById('viewSub').textContent = view.sub();
     }
   }
 

@@ -36,8 +36,12 @@ jobs:
         run: |
           npm run test:unit
           npm run test:usage
+          npm run test:cny
+          npm run test:usage-e2e
+          npm run test:usage-sink
           npm run test:claudecfg
           npm run test:context
+          npm run test:i18n
 
   build:
     needs: verify

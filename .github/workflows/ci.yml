@@ -47,6 +47,12 @@ jobs:
         run: |
           npm run test:unit
           npm run test:usage
+          npm run test:cny
+          npm run test:usage-e2e
+          npm run test:usage-sink
+
+      - name: 界面文案双语覆盖
+        run: npm run test:i18n
 
       - name: Claude Code 配置写入与上下文窗口档位
         run: |

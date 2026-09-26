@@ -112,6 +112,14 @@ async function ensureEngine() {
   if (!engine) {
     engine = await import('./engine/engine.js');
     log('log', '[引擎] 模块已加载');
+    // 用量「实时」推送：引擎每记下一条用量就回调这里，直接转给渲染层。
+    // 走这条内部回调而不是去解析日志文本 —— 日志是给人看的，格式随时会变，
+    // 拿它当数据通道迟早会静默失效（改了文案就再也不推送了，而且不会报错）。
+    try {
+      engine.setUsageSink((entry) => broadcast('usage:record', entry));
+    } catch (e) {
+      log('warn', '[用量] 实时推送未挂上：' + e.message);
+    }
   }
   return engine;
 }

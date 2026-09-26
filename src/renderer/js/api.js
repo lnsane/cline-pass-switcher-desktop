@@ -86,22 +86,31 @@
     savePerModel:    (perModel) => API.req('/api/config', { method: 'POST', body: { perModel } }),
 
     // ---------- 用量统计 ----------
-    // 汇总按天返回（引擎侧已按 账号/渠道/模型 分好桶）
-    usage:      (days) => API.req('/api/usage?days=' + encodeURIComponent(days || 30)),
-    // 明细：从尾部取，支持按模型/来源筛选
+    // 汇总：granularity='hour' 时按小时返回（「当天」这一档画 0-23 点曲线用）
+    usage: (days, granularity) => API.req('/api/usage?days=' + encodeURIComponent(days || 30) +
+      (granularity ? '&granularity=' + encodeURIComponent(granularity) : '')),
+    // 明细：引擎按写入序号倒序取，再按时间倒序返回（最新的在前）
     usageRecords: (opts = {}) => {
       const q = new URLSearchParams();
       if (opts.limit) q.set('limit', opts.limit);
       if (opts.model) q.set('model', opts.model);
       if (opts.source) q.set('source', opts.source);
+      if (opts.from) q.set('from', opts.from);
+      if (opts.to) q.set('to', opts.to);
       const s = q.toString();
       return API.req('/api/usage/records' + (s ? '?' + s : ''));
     },
     // 扫描 Claude Code 会话记录（不开代理也能统计）。慢，给足超时。
     usageScan:    (opts = {}) => API.req('/api/usage/scan', { method: 'POST', body: opts, timeoutMs: 300000 }),
     usagePricing: () => API.req('/api/usage/pricing'),
+    // DeepSeek 官方人民币价目表 + 当前处于高峰/空闲
+    usagePricingCny: () => API.req('/api/usage/pricing-cny'),
     savePricing:  (pricing) => API.req('/api/usage/pricing', { method: 'POST', body: { pricing } }),
     usageCompact: (keepDays) => API.req('/api/usage/compact', { method: 'POST', body: { keepDays }, timeoutMs: 120000 }),
+    // 重算汇总与逐条的人民币金额（给加入人民币计价之前的老数据补上）
+    usageRecompute: () => API.req('/api/usage/recompute', { method: 'POST', body: {}, timeoutMs: 300000 }),
+    // 花费口径（只影响展示，不改记录）
+    saveUsageCurrency: (usageCurrency) => API.req('/api/config', { method: 'POST', body: { usageCurrency } }),
 
     // 修改单个模型的钉住配置（引擎按整表覆盖，所以先取全表再改一项）
     async patchPerModel(modelId, patch) {

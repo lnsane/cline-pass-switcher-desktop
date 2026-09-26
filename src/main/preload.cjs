@@ -67,4 +67,6 @@ contextBridge.exposeInMainWorld('cp', {
 
   onLog: (cb) => subscribe('engine:log', cb),
   onEngineState: (cb) => subscribe('engine:state', cb),
+  // 用量实时推送：引擎记下一条用量就推一次（见 main.js 的 setUsageSink）
+  onUsageRecord: (cb) => subscribe('usage:record', cb),
 });
