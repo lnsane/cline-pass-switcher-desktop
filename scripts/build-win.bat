@@ -121,7 +121,7 @@ start "" "%EXE%"
 :done
 call :restore_cp
 endlocal
-exit /b 0
+goto maybe_pause_ok
 
 rem ---------------------------------------------------------------- 出错分支
 :in_use
@@ -155,7 +155,7 @@ goto fail_plain
 :fail_plain
 call :restore_cp
 endlocal
-exit /b 1
+goto maybe_pause_fail
 
 :no_node
 echo 找不到 node / npm。
@@ -173,7 +173,27 @@ echo 产物：dist\win-unpacked\Cline Pass Switcher.exe
 echo 要出正式安装包 / 免安装单文件：npm run dist:win
 call :restore_cp
 endlocal
+goto maybe_pause_ok
+
+rem ============================================================================
+rem  双击运行时，脚本一退出窗口就关了，报错信息根本来不及看 —— 所以停一下等按键。
+rem
+rem  什么时候不暂停（避免卡住自动化）：
+rem    - 从管道 / 重定向调用：pause 在非交互 stdin 下会立刻返回，不会卡住
+rem    - 显式设了 CPS_NO_PAUSE=1
+rem  下面这段注释刻意只用 ASCII：插入时不必再考虑码页问题。
+rem ============================================================================
+:maybe_pause_ok
+if defined CPS_NO_PAUSE goto :eof
+echo.
+pause
 exit /b 0
+
+:maybe_pause_fail
+if defined CPS_NO_PAUSE exit /b 1
+echo.
+pause
+exit /b 1
 
 rem 把控制台码页切回原来的，别让用户的 cmd 会话停在别的码页
 :restore_cp
