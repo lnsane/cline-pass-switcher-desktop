@@ -16,27 +16,29 @@
 
   // 事件委托：视图用 innerHTML 重绘，事件统一挂到容器上。
   // 容器是复用的（#view / 模态框），所以按 (事件, 选择器) 记账：重绘时重新绑定会覆盖旧处理器，
-  // 只有真正的新选择器才会新增监听，避免同一容器上累积监听导致一次点击触发多次。
+  // 同一 (事件, 选择器) 永远只有一个处理器，避免同一容器上累积监听导致一次点击触发多次。
+  // 每种事件类型必须各挂一个监听：派发是跟着监听回调走的，没挂监听的事件类型
+  // 整条链都到不了处理器（只挂首个事件类型时，后注册的 input/click 会全部静默失效）。
   const DELEGATES = new WeakMap();
 
   U.delegate = (root, ev, selector, handler) => {
     if (!root) return root;
     let byEvent = DELEGATES.get(root);
-    if (!byEvent) {
-      byEvent = new Map();
-      DELEGATES.set(root, byEvent);
+    if (!byEvent) { byEvent = new Map(); DELEGATES.set(root, byEvent); }
+    let table = byEvent.get(ev);
+    if (!table) {
+      table = new Map();
+      byEvent.set(ev, table);
       U.on(root, ev, (e) => {
-        const table = byEvent.get(ev);
-        if (!table || !table.size) return;
+        const bound = byEvent.get(ev);
+        if (!bound || !bound.size) return;
         // 快照：处理器内部可能触发重绘并重新绑定
-        for (const [sel, fn] of Array.from(table)) {
+        for (const [sel, fn] of Array.from(bound)) {
           const target = e.target.closest(sel);
           if (target && root.contains(target)) fn(e, target);
         }
       });
     }
-    let table = byEvent.get(ev);
-    if (!table) { table = new Map(); byEvent.set(ev, table); }
     table.set(selector, handler);
     return root;
   };

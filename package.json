@@ -35,6 +35,7 @@
     "test:usage-e2e": "bash scripts/test-usage-e2e.sh",
     "test:usage-sink": "node scripts/test-usage-sink.mjs",
     "test:i18n": "node scripts/check-i18n-usage.mjs",
+    "test:delegate": "node scripts/test-delegate.mjs",
     "check:static": "node scripts/check-static.mjs",
     "test:usage-live": "node scripts/test-usage-live.mjs",
     "build:win": "scripts\\build-win.bat",

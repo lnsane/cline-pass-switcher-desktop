@@ -42,6 +42,7 @@ jobs:
           npm run test:claudecfg
           npm run test:context
           npm run test:i18n
+          npm run test:delegate
         # 不含 test:usage-e2e / test:live / test:e2e —— 那几个要真实账号密钥
 
   build:

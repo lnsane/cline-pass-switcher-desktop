@@ -57,6 +57,9 @@ jobs:
       - name: 界面文案双语覆盖
         run: npm run test:i18n
 
+      - name: 事件委托绑定语义（渲染层按钮是否真的绑上了监听）
+        run: npm run test:delegate
+
       - name: 静态自查（未使用 import / 译文混中文 / 重复键）
         run: npm run check:static
 
