@@ -1,7 +1,7 @@
 {
   "name": "cline-pass-switcher-desktop",
   "productName": "Cline Pass Switcher",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "Cline Pass 上游控制台桌面版：枚举/校验/钉住订阅模型背后的上游渠道，账号池轮询，OpenAI 兼容代理",
   "author": {
     "name": "Cline Pass Switcher",
